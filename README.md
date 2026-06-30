@@ -1,107 +1,60 @@
 # PitchViz
 
-A small desktop tool to help practice **harmonica bends** by visualizing your
-microphone input in real time. The goal is to show the note you're playing,
-where you can bend it to, and how far along that bend you currently are.
+A small desktop app for practicing **harmonica bends**. It listens to your mic
+and shows the note you're playing, the bends you can reach, and how close you
+are to hitting and holding them.
 
 Target instrument: standard 10-hole diatonic harmonica, key of **C**.
 
-## Status
+![PitchViz screenshot](assets/screenshot.png)
 
-Built incrementally in small buckets:
+## Quick start
 
-- [x] **Bucket 1 — Mic capture + level meter** (`level_meter.py`)
-- [x] **Bucket 2 — Pitch detection, console** (`pitch.py`, `pitch_console.py`)
-- [x] **Bucket 3 — GUI assembly** (`app.py`, `harmonica.py`): level + note + piano + C-harp hole
-- [x] **Bucket 4 — Harmonica bend trainer**: 10-hole diagram + live bend practice panel
-
-## Setup
-
-Requires Python 3.10+. Create a virtual environment and install the deps:
+Requires Python 3.10+.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-```
-
-`tkinter` is part of the standard library, so nothing extra is needed for the GUI.
-
-## Running Bucket 1 (level meter)
-
-With the venv activated:
-
-```powershell
-python level_meter.py
-```
-
-Or without activating it:
-
-```powershell
-.\.venv\Scripts\python.exe level_meter.py
-```
-
-A small window opens with:
-
-- a dropdown to pick which microphone / input device to use
-- a live level bar (green/yellow/red) showing input loudness
-- a numeric dBFS readout and a peak-hold marker
-
-Pick your mic from the dropdown and make some noise — the bar should react.
-
-## Running Bucket 2 (pitch detection, console)
-
-Live readings from the mic (note, frequency, cents offset):
-
-```powershell
-python pitch_console.py            # default input device
-python pitch_console.py --list     # list input devices and exit
-python pitch_console.py --device 8 # pick a device by index
-```
-
-Verify the detection logic without a mic (synthetic sine self-test):
-
-```powershell
-python pitch.py
-```
-
-## Running the app (GUI)
-
-The combined window shows everything:
-
-- **Input level** bar with a **draggable detection-threshold** marker (drag it to
-  set how loud a sound must be before a note is detected). The detected note is
-  shown as an **outline** (piano + harmonica) so it doesn't clash with blow/draw
-  colors.
-- A **clickable 10-hole harmonica diagram** with blow/draw note labels. Each
-  hole: **top = blow, bottom = draw, middle = lock button**. The lock button
-  holds the hole number plus a small **vertical bend-bar** (blow top / draw
-  bottom) that mirrors the practice panel — bend-goal lines, your live position,
-  and a teal success state. Locking is the **only** way to lock/unlock and plays
-  the goal note.
-- The **bend practice panel** (main focus): the whole hole as a pitch ladder
-  from **blow (blue)** to **draw (orange)** with the **bend targets in between**.
-  A live marker tracks your pitch (locked or not); when you go out of the
-  bendable range it **freezes the last pitch and fades**. A recede-able **peak**
-  line shows your current bend depth. Click a target to set your **goal** (and
-  hear it). The **hold meter** (with a **best-hold high-water mark**) rewards
-  holding the goal in tune for a configurable number of seconds with a **chime**
-  and a **success color**. Progress (hold / best-hold / success) is recorded
-  **only while locked**; pitch indication works always.
-- A **clickable piano keyboard**. Hovering a note anywhere (piano, harmonica, or
-  a practice-panel target) **cross-highlights** it everywhere.
-
-Clicking a note plays it; recording is paused until that sound finishes.
-**reset** (in the panel) clears the current hole; **Reset all bests** lives in
-settings, alongside peak inertia, marker smoothing, and hold-to-succeed seconds.
-Top-right: **mute** and the **gear**.
-
-```powershell
 python app.py
 ```
 
-Check the note → hole mapping and bend lanes without a mic:
+(`tkinter` ships with Python, so there's nothing else to install.)
+
+## How to use it
+
+- **Input level** (top): drag the marker to set the detection threshold (how
+  loud a sound must be before it's detected).
+- **Harmonica diagram**: click a hole's **top** to hear its blow note, **bottom**
+  for its draw note, or the **middle (lock button)** to lock that hole for
+  practice. The lock button shows the hole number and a mini bend-bar.
+- **Bend practice panel** (main view): the hole shown as a ladder from blow
+  (blue) to draw (orange) with the bend targets in between.
+  - A marker follows your pitch; the **peak** line shows your current bend depth.
+  - Click a target to set it as your **goal** and hear it.
+  - Hold the goal in tune for a few seconds to score a **success** (chime +
+    teal). The **hold bar** tracks your best attempt. Progress is recorded only
+    while a hole is **locked**.
+- **Piano**: shows the detected note (outline) and the selected hole's blow/draw
+  keys. Hovering a note anywhere highlights it everywhere.
+- **Top-right**: **mute** playback, or open **settings** (peak inertia, marker
+  smoothing, hold-to-succeed seconds, reset all).
+
+## Project layout
+
+| File | Purpose |
+| --- | --- |
+| `app.py` | The full GUI app |
+| `pitch.py` | Pitch detection + note math |
+| `harmonica.py` | C-harmonica note/hole/bend mapping |
+| `synth.py` | Tone + success-chime playback |
+| `level_meter.py` | Audio capture + level helpers |
+
+## Extra tools (optional)
 
 ```powershell
-python harmonica.py
+python pitch_console.py    # live pitch readings in the terminal
+python pitch.py            # pitch-detection self-test (no mic)
+python harmonica.py        # note/hole/bend mapping self-test
+python level_meter.py      # standalone mic level meter
 ```
