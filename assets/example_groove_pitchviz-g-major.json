@@ -1,0 +1,171 @@
+{
+  "format": "pitchviz.jam-session",
+  "version": 1,
+  "bpm": 80,
+  "key": "G",
+  "scale": "Major",
+  "length": {
+    "bars": 16,
+    "beatsPerBar": 4,
+    "totalBeats": 64
+  },
+  "settings": {
+    "countInBeats": 0,
+    "minChordBeats": 4,
+    "chordSoundBeats": 1,
+    "manualQuantBeats": 1,
+    "liveChordWindowBeats": 1,
+    "snapDetectedChordsToScale": false,
+    "chordSounds": false,
+    "loop": false,
+    "metronome": false,
+    "metronomeRateBeats": 1,
+    "editTimeline": false
+  },
+  "chords": [
+    {
+      "start": 0,
+      "length": 4,
+      "chord": {
+        "name": "Em",
+        "root": 4,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 4,
+      "length": 4,
+      "chord": {
+        "name": "Em",
+        "root": 4,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 8,
+      "length": 4,
+      "chord": {
+        "name": "Bm",
+        "root": 11,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 12,
+      "length": 4,
+      "chord": {
+        "name": "Bm",
+        "root": 11,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 16,
+      "length": 4,
+      "chord": {
+        "name": "G",
+        "root": 7,
+        "quality": "maj"
+      }
+    },
+    {
+      "start": 20,
+      "length": 4,
+      "chord": {
+        "name": "Em",
+        "root": 4,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 24,
+      "length": 4,
+      "chord": {
+        "name": "D",
+        "root": 2,
+        "quality": "maj"
+      }
+    },
+    {
+      "start": 28,
+      "length": 4,
+      "chord": {
+        "name": "Bm",
+        "root": 11,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 32,
+      "length": 4,
+      "chord": {
+        "name": "Em",
+        "root": 4,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 36,
+      "length": 4,
+      "chord": {
+        "name": "Bm",
+        "root": 11,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 40,
+      "length": 4,
+      "chord": {
+        "name": "Bm",
+        "root": 11,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 44,
+      "length": 4,
+      "chord": {
+        "name": "Em",
+        "root": 4,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 48,
+      "length": 4,
+      "chord": {
+        "name": "Em",
+        "root": 4,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 52,
+      "length": 4,
+      "chord": {
+        "name": "Bm",
+        "root": 11,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 56,
+      "length": 4,
+      "chord": {
+        "name": "Bm",
+        "root": 11,
+        "quality": "min"
+      }
+    },
+    {
+      "start": 60,
+      "length": 4,
+      "chord": {
+        "name": "Am",
+        "root": 9,
+        "quality": "min"
+      }
+    }
+  ]
+}
