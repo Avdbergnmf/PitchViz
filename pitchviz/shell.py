@@ -82,6 +82,10 @@ class ToolkitApp:
         synth.play_success()
         self._suppress_until = time.monotonic() + 0.6
 
+    def stop_audio(self):
+        synth.stop()
+        self._suppress_until = time.monotonic()
+
     def suppressed(self) -> bool:
         return time.monotonic() < self._suppress_until
 

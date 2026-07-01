@@ -18,8 +18,6 @@ ACCENT_DIM = "#3a4254"
 WHITE_KEY = "#f5f5f5"
 WHITE_KEY_EDGE = "#cccccc"
 BLACK_KEY = "#222222"
-WHITE_KEY_HOVER = "#e6edf5"
-BLACK_KEY_HOVER = "#3a3f47"
 
 # --- Accuracy / level -------------------------------------------------------
 GREEN = "#3ddc84"
@@ -33,8 +31,6 @@ MUTED = "#888888"
 # --- Breath actions ---------------------------------------------------------
 BLOW_C = "#5aa9e6"
 DRAW_C = "#f39c5a"
-BLOW_HOVER = "#3d5a73"
-DRAW_HOVER = "#73553d"
 
 # --- Markers / highlights ---------------------------------------------------
 GOLD = "#ffd166"          # selection / chord emphasis
@@ -42,10 +38,12 @@ PEAK_C = "#4d96ff"
 SUCCESS_C = "#39e0c0"
 DETECT_OUTLINE = "#9be8b0"
 DIM = "#565c66"
-HOVER_NOTE = "#ffffff"
 CHORD_MARK = "#ffffff"    # diamond marker on chord tones
-
-ROOT_C = "#ffab40"        # position hint text
+HOVER_GLOW = "#ffffff"
+HOVER_GLOW_SOFT = "#8fb7ff"
+HOVER_GLOW_WIDTH = 3
+SELECT_OUTLINE_WIDTH = 3
+DETECT_OUTLINE_WIDTH = 3
 
 # --- Tuning thresholds (cents) ---------------------------------------------
 LOCK_CENTS = 15
@@ -77,3 +75,37 @@ def accuracy_color(cents_abs: float) -> str:
     if cents_abs <= NEAR_CENTS:
         return YELLOW
     return RED
+
+
+def draw_effect_outline(canvas, x0, y0, x1, y1, color: str, width: int = SELECT_OUTLINE_WIDTH):
+    """Shared crisp selection/live-note outline for canvas controls."""
+    canvas.create_rectangle(x0, y0, x1, y1, outline=color, width=width)
+
+
+def draw_hover_glow(canvas, x0, y0, x1, y1):
+    """Shared hover treatment: visible even when the control is already filled."""
+    canvas.create_rectangle(x0, y0, x1, y1, outline=HOVER_GLOW_SOFT, width=HOVER_GLOW_WIDTH + 2)
+    canvas.create_rectangle(x0 + 2, y0 + 2, x1 - 2, y1 - 2,
+                            outline=HOVER_GLOW, width=HOVER_GLOW_WIDTH)
+
+
+def draw_line_glow(canvas, x0, y0, x1, y1, color: str = HOVER_GLOW):
+    """Shared glow treatment for short line targets such as bend ticks."""
+    canvas.create_line(x0, y0, x1, y1, fill=HOVER_GLOW_SOFT, width=7)
+    canvas.create_line(x0, y0, x1, y1, fill=color, width=3)
+
+
+def draw_spotlight(canvas, x0, y0, x1, y1, color: str, base: str):
+    """Soft in-box live-note highlight that does not rely on edge outlines."""
+    cx = (x0 + x1) / 2
+    cy = (y0 + y1) / 2
+    half_w = (x1 - x0) / 2
+    half_h = (y1 - y0) / 2
+    for i, t in enumerate((0.18, 0.28, 0.40, 0.54)):
+        scale = 1.0 - i * 0.18
+        fill = lerp_color(base, color, t)
+        canvas.create_oval(
+            cx - half_w * scale, cy - half_h * scale,
+            cx + half_w * scale, cy + half_h * scale,
+            fill=fill, outline="",
+        )

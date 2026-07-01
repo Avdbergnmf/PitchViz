@@ -27,6 +27,7 @@ SAMPLERATE = 44100
 BLOCKSIZE = 2048
 FPS_EST = SAMPLERATE / BLOCKSIZE        # ~frames per second of audio blocks
 NOTE_HOLD_FRAMES = 12                   # keep showing a note briefly after it stops
+CHORD_CHROMA_SAMPLES = 8192             # ~186 ms: enough FFT context for chords
 
 
 def rms_to_dbfs(rms: float) -> float:
@@ -91,6 +92,8 @@ class AudioEngine:
         self._action: str | None = None
         self._note_name = ""
         self._cents = 0.0
+        self._chroma_buffer = np.zeros(CHORD_CHROMA_SAMPLES, dtype=np.float64)
+        self._chroma_filled = 0
 
     # ----- threshold ------------------------------------------------------
 
@@ -109,8 +112,29 @@ class AudioEngine:
         except queue.Full:
             pass
 
+    def _reset_chroma_buffer(self):
+        self._chroma_buffer.fill(0.0)
+        self._chroma_filled = 0
+
+    def _append_chroma_samples(self, block: np.ndarray):
+        block = np.asarray(block, dtype=np.float64)
+        n = block.size
+        if n >= CHORD_CHROMA_SAMPLES:
+            self._chroma_buffer[:] = block[-CHORD_CHROMA_SAMPLES:]
+            self._chroma_filled = CHORD_CHROMA_SAMPLES
+            return
+        self._chroma_buffer[:-n] = self._chroma_buffer[n:]
+        self._chroma_buffer[-n:] = block
+        self._chroma_filled = min(CHORD_CHROMA_SAMPLES, self._chroma_filled + n)
+
+    def _chroma_source(self, fallback: np.ndarray) -> np.ndarray:
+        if self._chroma_filled <= fallback.size:
+            return fallback
+        return self._chroma_buffer[-self._chroma_filled:]
+
     def start(self, device_index: int):
         self.stop()
+        self._reset_chroma_buffer()
         try:
             self._stream = sd.InputStream(
                 device=device_index, channels=1, samplerate=self.samplerate,
@@ -134,18 +158,22 @@ class AudioEngine:
 
     def poll(self) -> AudioState | None:
         """Process the latest queued block. Returns None if no new audio."""
-        block = None
+        blocks = []
         while True:
             try:
-                block = self._q.get_nowait()
+                blocks.append(self._q.get_nowait())
             except queue.Empty:
                 break
-        if block is None:
+        if not blocks:
             return None
+
+        block = blocks[-1]
+        for queued in blocks:
+            self._append_chroma_samples(queued)
 
         rms = float(np.sqrt(np.mean(np.square(block))))
         level = db_to_fraction(rms_to_dbfs(rms))
-        chroma_vec = compute_chroma(block, self.samplerate)
+        chroma_vec = compute_chroma(self._chroma_source(block), self.samplerate)
 
         freq = detect_pitch(block, self.samplerate, rms_gate=self.gate_rms())
         if freq is not None:

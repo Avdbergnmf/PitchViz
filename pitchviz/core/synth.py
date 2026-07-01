@@ -4,6 +4,9 @@ Generates a short, pleasant tone for a given frequency and plays it through
 the default output device. Used so you can hear a note or a bend target.
 """
 
+import queue
+import threading
+
 import numpy as np
 import sounddevice as sd
 
@@ -14,6 +17,72 @@ CLICK_FREQ = 880.0
 CLICK_ACCENT_FREQ = 1100.0
 # A few harmonics give it a slightly reedy, less pure-sine character.
 HARMONICS = [(1, 1.0), (2, 0.35), (3, 0.15)]
+
+_CMD_Q: "queue.Queue[tuple[str, object]]" = queue.Queue(maxsize=8)
+_WORKER_STARTED = False
+_WORKER_LOCK = threading.Lock()
+
+
+def _ensure_worker():
+    global _WORKER_STARTED
+    with _WORKER_LOCK:
+        if _WORKER_STARTED:
+            return
+        t = threading.Thread(target=_audio_worker, daemon=True, name="PitchVizAudio")
+        t.start()
+        _WORKER_STARTED = True
+
+
+def _enqueue(cmd: str, payload=None):
+    _ensure_worker()
+    try:
+        _CMD_Q.put_nowait((cmd, payload))
+    except queue.Full:
+        try:
+            _CMD_Q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            _CMD_Q.put_nowait((cmd, payload))
+        except queue.Full:
+            pass
+
+
+def _clear_queue():
+    while True:
+        try:
+            _CMD_Q.get_nowait()
+        except queue.Empty:
+            return
+
+
+def _audio_worker():
+    while True:
+        cmd, payload = _CMD_Q.get()
+        try:
+            if cmd == "stop":
+                sd.stop()
+            elif cmd == "freq":
+                freq = float(payload)
+                if freq > 0:
+                    sd.stop()
+                    sd.play(make_tone(freq), PLAY_SR)
+            elif cmd == "chord":
+                freqs, duration = payload
+                if freqs:
+                    sd.stop()
+                    sd.play(make_chord(freqs, duration=float(duration)), PLAY_SR)
+            elif cmd == "click":
+                freq = CLICK_ACCENT_FREQ if bool(payload) else CLICK_FREQ
+                t = np.linspace(0, CLICK_DUR, int(PLAY_SR * CLICK_DUR), endpoint=False)
+                wave = np.sin(2 * np.pi * freq * t) * np.exp(-t * 35)
+                sd.play((0.45 * wave).astype(np.float32), PLAY_SR)
+            elif cmd == "success":
+                freqs = [1046.50, 1318.51, 1567.98, 2093.00]
+                sd.stop()
+                sd.play(make_sequence(freqs, note_dur=0.10), PLAY_SR)
+        except Exception:
+            pass
 
 
 def make_tone(freq: float, duration: float = DURATION, sr: int = PLAY_SR) -> np.ndarray:
@@ -44,12 +113,7 @@ def play_freq(freq: float):
     """Play a tone at the given frequency (non-blocking). Safe to call rapidly."""
     if freq <= 0:
         return
-    try:
-        sd.stop()
-        sd.play(make_tone(freq), PLAY_SR)
-    except Exception:
-        # Audio output is best-effort; never let playback crash the GUI.
-        pass
+    _enqueue("freq", freq)
 
 
 def make_chord(freqs, duration: float = DURATION, sr: int = PLAY_SR) -> np.ndarray:
@@ -74,39 +138,25 @@ def make_chord(freqs, duration: float = DURATION, sr: int = PLAY_SR) -> np.ndarr
 
 def play_click(accent: bool = False):
     """Short metronome tick (non-blocking)."""
-    freq = CLICK_ACCENT_FREQ if accent else CLICK_FREQ
-    try:
-        t = np.linspace(0, CLICK_DUR, int(PLAY_SR * CLICK_DUR), endpoint=False)
-        wave = np.sin(2 * np.pi * freq * t) * np.exp(-t * 35)
-        sd.play((0.45 * wave).astype(np.float32), PLAY_SR)
-    except Exception:
-        pass
+    _enqueue("click", bool(accent))
 
 
 def play_chord(freqs, duration: float = DURATION):
     """Play several frequencies together as a chord."""
     if not freqs:
         return
-    try:
-        sd.stop()
-        sd.play(make_chord(freqs, duration=duration), PLAY_SR)
-    except Exception:
-        pass
+    _enqueue("chord", (list(freqs), float(duration)))
 
 
 def play_success():
     """A short, bright major arpeggio to reward holding a bend goal."""
-    # C6, E6, G6, C7.
-    freqs = [1046.50, 1318.51, 1567.98, 2093.00]
-    try:
-        sd.stop()
-        sd.play(make_sequence(freqs, note_dur=0.10), PLAY_SR)
-    except Exception:
-        pass
+    _enqueue("success")
 
 
 def stop():
+    _clear_queue()
     try:
         sd.stop()
     except Exception:
         pass
+    _enqueue("stop")

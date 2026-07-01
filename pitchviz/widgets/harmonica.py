@@ -9,9 +9,10 @@ Config written by the tool before ``redraw()``:
     blow_fill[hole] / draw_fill[hole]          -> zone fill color (or absent)
     blow_label_color[hole] / draw_label_color  -> label color (default light)
     outline[(hole, "blow"|"draw")]             -> reed outline overlay
+    spotlights[(hole, "blow"|"draw")]          -> soft live-note in-box glow
     middle_renderer(canvas, hole, x0, x1, top_b, bot_b)  -> custom middle
 
-Events: on_click(hole, zone, y) / on_hover(hole, zone) / on_leave(), where zone
+Events: on_click(hole, zone, y) / on_hover(hole, zone, y) / on_leave(), where zone
 is "blow", "draw", or "mid" and ``y`` is the click's pixel position (so a tool
 can resolve which bend tick in the middle was clicked).
 """
@@ -40,8 +41,11 @@ class HarmonicaWidget(tk.Canvas):
         self.blow_label_color: dict[int, str] = {}
         self.draw_label_color: dict[int, str] = {}
         self.outline: dict[tuple[int, str], str] = {}
+        self.spotlights: dict[tuple[int, str], str] = {}
         self.blow_markers: dict[int, str] = {}   # "root" | "chord"
         self.draw_markers: dict[int, str] = {}
+        self.hover_zone: tuple[int, str] | None = None
+        self.hover_zones: set[tuple[int, str]] = set()
 
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<Button-1>", self._click)
@@ -70,12 +74,18 @@ class HarmonicaWidget(tk.Canvas):
 
     def _motion(self, event):
         hole, zone = self.zone_at(event.x, event.y)
+        self.hover_zone = (hole, zone) if hole and zone else None
         if hole and self.on_hover:
-            self.on_hover(hole, zone)
+            self.on_hover(hole, zone, event.y)
+        elif hole:
+            self.redraw()
 
     def _leave(self, _event):
+        self.hover_zone = None
         if self.on_leave:
             self.on_leave()
+        else:
+            self.redraw()
 
     # ----- drawing --------------------------------------------------------
 
@@ -97,16 +107,20 @@ class HarmonicaWidget(tk.Canvas):
             bf = self.blow_fill.get(hole)
             if bf:
                 c.create_rectangle(x0, 0, x1, top_b, fill=bf, outline="")
+            self._draw_spotlight_if_needed(c, hole, "blow", x0, 0, x1, top_b,
+                                           bf or T.PANEL)
             c.create_text(cx, 11, text=midi_name(lad.blow),
                           fill=self.blow_label_color.get(hole, LABEL_COLOR), font=(T.FONT, 8))
-            self._draw_zone_marker(c, self.blow_markers.get(hole), x1 - 6, 12)
+            self._draw_zone_marker(c, self.blow_markers.get(hole), cx, 29)
 
             df = self.draw_fill.get(hole)
             if df:
                 c.create_rectangle(x0, bot_b, x1, h, fill=df, outline="")
+            self._draw_spotlight_if_needed(c, hole, "draw", x0, bot_b, x1, h,
+                                           df or T.PANEL)
             c.create_text(cx, h - 11, text=midi_name(lad.draw),
                           fill=self.draw_label_color.get(hole, LABEL_COLOR), font=(T.FONT, 8))
-            self._draw_zone_marker(c, self.draw_markers.get(hole), x1 - 6, h - 12)
+            self._draw_zone_marker(c, self.draw_markers.get(hole), cx, h - 29)
 
             if self.middle_renderer:
                 self.middle_renderer(c, hole, x0, x1, top_b, bot_b)
@@ -116,15 +130,32 @@ class HarmonicaWidget(tk.Canvas):
 
             ob = self.outline.get((hole, "blow"))
             if ob:
-                c.create_rectangle(x0 + 1, 1, x1 - 1, top_b, outline=ob, width=2)
+                T.draw_effect_outline(c, x0 + 1, 1, x1 - 1, top_b, ob, width=2)
             od = self.outline.get((hole, "draw"))
             if od:
-                c.create_rectangle(x0 + 1, bot_b, x1 - 1, h - 1, outline=od, width=2)
+                T.draw_effect_outline(c, x0 + 1, bot_b, x1 - 1, h - 1, od, width=2)
+
+            if self._is_hovered(hole, "blow"):
+                T.draw_hover_glow(c, x0 + 1, 1, x1 - 1, top_b)
+            elif self._is_hovered(hole, "draw"):
+                T.draw_hover_glow(c, x0 + 1, bot_b, x1 - 1, h - 1)
+            elif self._is_hovered(hole, "mid"):
+                T.draw_hover_glow(c, x0 + 4, top_b + 3, x1 - 4, bot_b - 3)
+
+    def _is_hovered(self, hole: int, zone: str) -> bool:
+        return self.hover_zone == (hole, zone) or (hole, zone) in self.hover_zones
+
+    def _draw_spotlight_if_needed(self, c, hole: int, zone: str,
+                                  x0: float, y0: float, x1: float, y1: float,
+                                  base: str):
+        color = self.spotlights.get((hole, zone))
+        if color:
+            T.draw_spotlight(c, x0 + 3, y0 + 3, x1 - 3, y1 - 3, color, base)
 
     @staticmethod
     def _draw_zone_marker(c, kind: str | None, x: float, y: float):
         """Chord-tone marker on a blow/draw reed (filled root, outline third/fifth)."""
         if kind == "root":
-            c.create_text(x, y, text="\u25c6", fill=T.GOLD, font=(T.FONT, 11, "bold"))
+            c.create_text(x, y, text="\u25c6", fill=T.GOLD, font=(T.FONT, 17, "bold"))
         elif kind == "chord":
-            c.create_text(x, y, text="\u25c7", fill=T.CHORD_MARK, font=(T.FONT, 9, "bold"))
+            c.create_text(x, y, text="\u25c7", fill=T.CHORD_MARK, font=(T.FONT, 15, "bold"))

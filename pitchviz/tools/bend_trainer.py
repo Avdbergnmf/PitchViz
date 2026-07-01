@@ -20,9 +20,9 @@ from ..core.harmonica import (
     note_locations,
 )
 from ..core.theme import (
-    BG, BLOW_C, BLOW_HOVER, DARK, DETECT_OUTLINE, DIM, DRAW_C, DRAW_HOVER,
-    FONT, GOLD, GREEN, HOVER_NOTE, LOCK_CENTS, MUTED, NEAR_CENTS, PANEL,
-    PANEL2, PEAK_C, SUCCESS_C, TEXT, accuracy_color,
+    BG, BLOW_C, DARK, DETECT_OUTLINE, DIM, DRAW_C,
+    FONT, GOLD, GREEN, HOVER_GLOW, LOCK_CENTS, MUTED, NEAR_CENTS, PANEL,
+    PANEL2, PEAK_C, SUCCESS_C, TEXT, accuracy_color, draw_hover_glow, draw_line_glow,
 )
 from ..widgets.harmonica import HarmonicaWidget
 from ..widgets.piano import PianoWidget
@@ -260,9 +260,14 @@ class BendTrainerTool(ToolBase):
             self._hover_note = note
             self._refresh_views()
 
-    def _on_harp_hover(self, hole, zone):
+    def _on_harp_hover(self, hole, zone, y=None):
         lad = hole_ladder(hole)
-        note = lad.blow if zone == "blow" else lad.draw if zone == "draw" else None
+        note = (
+            lad.blow if zone == "blow"
+            else lad.draw if zone == "draw"
+            else self._bend_note_at_harp(hole, y) if y is not None
+            else None
+        )
         if (hole, zone) != (self._hover_hole, self._hover_zone) or note != self._hover_note:
             self._hover_hole, self._hover_zone, self._hover_note = hole, zone, note
             self._refresh_views()
@@ -285,6 +290,19 @@ class BendTrainerTool(ToolBase):
     def _on_bend_leave(self, _e):
         self._set_hover_note(None)
 
+    def _bend_note_at_harp(self, hole, y) -> int | None:
+        lad = hole_ladder(hole)
+        if y is None or not lad.has_bends:
+            return None
+        h = self.harp.winfo_height()
+        top_b, bot_b = h * 0.26, h * 0.74
+        ya, yb = top_b + 9, bot_b - 9
+        if yb <= ya:
+            return None
+        approx = lad.blow + (y - ya) / (yb - ya) * (lad.draw - lad.blow)
+        nearest = min(lad.bend_notes, key=lambda b: abs(b - approx))
+        return nearest if abs(nearest - approx) <= 0.6 else None
+
     # ----- drawing: harmonica (config + lock widget) ----------------------
 
     def _sync_harp(self):
@@ -292,6 +310,8 @@ class BendTrainerTool(ToolBase):
         hw.blow_fill.clear(); hw.draw_fill.clear()
         hw.blow_label_color.clear(); hw.draw_label_color.clear()
         hw.outline.clear()
+        hw.spotlights.clear()
+        hw.hover_zones.clear()
         silent = self._silent_frames > 0
         sel = self._selection
         for hole in range(1, 11):
@@ -300,16 +320,15 @@ class BendTrainerTool(ToolBase):
             if sel_here and sel[1] == "blow":
                 hw.blow_fill[hole] = BLOW_C
                 hw.blow_label_color[hole] = "#fff"
-            elif (self._hover_hole == hole and self._hover_zone == "blow") or self._hover_note == lad.blow:
-                hw.blow_fill[hole] = BLOW_HOVER
-                hw.blow_label_color[hole] = "#fff"
+            if self._hover_note == lad.blow:
+                hw.hover_zones.add((hole, "blow"))
             if sel_here and sel[1] == "draw":
                 hw.draw_fill[hole] = DRAW_C
                 hw.draw_label_color[hole] = "#fff"
-            elif (self._hover_hole == hole and self._hover_zone == "draw") or self._hover_note == lad.draw:
-                hw.draw_fill[hole] = DRAW_HOVER
-                hw.draw_label_color[hole] = "#fff"
+            if self._hover_note == lad.draw:
+                hw.hover_zones.add((hole, "draw"))
             if not silent and hole == self._live_hole and self._live_action in ("blow", "draw"):
+                hw.spotlights[(hole, self._live_action)] = DETECT_OUTLINE
                 hw.outline[(hole, self._live_action)] = DETECT_OUTLINE
         hw.redraw()
 
@@ -320,9 +339,11 @@ class BendTrainerTool(ToolBase):
         hover_mid = self._hover_hole == hole and self._hover_zone == "mid"
         bx0, bx1 = x0 + 5, x1 - 5
         by0, by1 = top_b + 3, bot_b - 3
-        outline = GOLD if locked else ("#cfd8e3" if hover_mid else "#3a3f47")
+        outline = GOLD if locked else (HOVER_GLOW if hover_mid else "#3a3f47")
         c.create_rectangle(bx0, by0, bx1, by1, outline=outline,
                            width=2 if (locked or hover_mid) else 1, fill=DARK)
+        if hover_mid:
+            draw_hover_glow(c, bx0, by0, bx1, by1)
         c.create_text(bx0 + (bx1 - bx0) * 0.24, (by0 + by1) / 2, text=str(hole),
                       fill="#dfe6ef", font=(FONT, 12, "bold"))
 
@@ -347,6 +368,8 @@ class BendTrainerTool(ToolBase):
                 col = "#8a8f98"
                 ww = 5
             c.create_line(bar_x - ww, y, bar_x + ww, y, fill=col, width=2)
+            if self._hover_note == midi:
+                draw_line_glow(c, bar_x - ww - 2, y, bar_x + ww + 2, y, HOVER_GLOW)
 
         if practice == hole and self._display_midi is not None:
             col = DIM if not self._in_range else "#fff"
@@ -359,6 +382,7 @@ class BendTrainerTool(ToolBase):
     def _sync_piano(self):
         pw = self.piano
         pw.fills.clear(); pw.outlines.clear()
+        pw.spotlights.clear()
         sel_blow = sel_draw = sel_midi = None
         if self._selection:
             hole = self._selection[0]
@@ -374,6 +398,7 @@ class BendTrainerTool(ToolBase):
         if sel_blow is not None:
             pw.fills[sel_blow] = BLOW_C
         if self._silent_frames == 0 and self._current_midi is not None:
+            pw.spotlights[self._current_midi] = DETECT_OUTLINE
             pw.outlines[self._current_midi] = DETECT_OUTLINE
         pw.hover_note = self._hover_note
         pw.redraw()
@@ -461,7 +486,7 @@ class BendTrainerTool(ToolBase):
             is_hover = midi == self._hover_note
             locked_on = is_near and cents_abs is not None and cents_abs <= LOCK_CENTS
             tcol = (SUCCESS_C if (is_goal and succeeded) else GREEN if locked_on
-                    else GOLD if is_goal else HOVER_NOTE if is_hover else col)
+                    else GOLD if is_goal else HOVER_GLOW if is_hover else col)
             wln = 3 if (is_goal or is_near or is_hover) else 1
             c.create_line(x, bar_y - bar_h / 2 - 10, x, bar_y + bar_h / 2 + 10, fill=tcol, width=wln)
             if is_goal:

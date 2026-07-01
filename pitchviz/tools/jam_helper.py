@@ -1,9 +1,8 @@
 """Jam Helper tool: pick a backing-track key + scale, get notes to play.
 
 Recommends the scale notes for the chosen key, highlights them on the shared
-piano and harmonica views (including which ones need bends), tells you whether
-the note you're currently playing fits, and suggests the harmonica position to
-play in on your C harp.
+piano and harmonica views (including which ones need bends), and tells you
+whether the note you're currently playing fits.
 
 Reuses the same widgets, colors, and hover/cross-highlight behavior as the Bend
 Trainer; only the highlight logic differs.
@@ -18,7 +17,7 @@ from tkinter import ttk
 
 from ..core import music as M
 from ..core.audio import NOTE_HOLD_FRAMES
-from ..core.chords import Chord, ChordTracker, all_triads, chord_midis, dominant_chord
+from ..core.chords import Chord, ChordDetector, all_triads, chord_midis, dominant_chord
 from ..core.harmonica import (
     HIGHEST_MIDI,
     LOWEST_MIDI,
@@ -28,8 +27,9 @@ from ..core.harmonica import (
     note_locations,
 )
 from ..core.theme import (
-    ACCENT, ACCENT_DIM, BG, BLOW_C, BLOW_HOVER, CHORD_MARK, DARK, DRAW_C, DRAW_HOVER,
-    FONT, GOLD, GREEN, MUTED, PANEL, PANEL2, RED, ROOT_C, TEXT, lerp_color,
+    ACCENT, ACCENT_DIM, BG, BLOW_C, CHORD_MARK, DARK, DRAW_C,
+    FONT, GOLD, GREEN, HOVER_GLOW, MUTED, PANEL, PANEL2, RED, TEXT,
+    draw_hover_glow, draw_line_glow, lerp_color,
 )
 from ..widgets.harmonica import HarmonicaWidget
 from ..widgets.piano import PianoWidget
@@ -38,10 +38,21 @@ from .base import ToolBase
 DEFAULT_KEY = "G"
 DEFAULT_SCALE = "Major"
 DEFAULT_BEATS_PER_BAR = 4
-DEFAULT_MIN_CHORD_BEATS = 4
+DEFAULT_MIN_CHORD_BEATS = DEFAULT_BEATS_PER_BAR
 DEFAULT_CHORD_PLAY_BEATS = 1
 DEFAULT_COUNT_IN_BEATS = 0
+DEFAULT_MANUAL_QUANT_BEATS = 1
+DEFAULT_LIVE_CHORD_WINDOW_BEATS = 1
+DEFAULT_METRONOME_RATE_BEATS = 1
+DEFAULT_RESTRICT_CHORDS = False
 EDIT_DOUBLE_MS = 400   # max gap between clicks to open the chord editor
+TIMELINE_EDGE_PX = 8
+TIMELINE_DRAG_PX = 4
+RECORD_CHORD_MIN_CONFIDENCE = 0.05
+LIVE_CHORD_MIN_CONFIDENCE = 0.12
+LIVE_CHORD_CHANGE_CONFIDENCE = 0.48
+LIVE_CHORD_PAUSE_SECONDS = 0.35
+LIVE_CHORD_CHANGE_FRAMES = 2
 
 
 @dataclass
@@ -50,6 +61,15 @@ class Seg:
     start: int             # start beat (0-based)
     length: int            # length in beats
     chord: Chord | None    # None = unknown / gap
+
+
+@dataclass
+class TimelineEdit:
+    mode: str
+    idx: int
+    start_x: int
+    moved: bool
+    original: list[Seg]
 
 
 class JamHelperTool(ToolBase):
@@ -63,8 +83,6 @@ class JamHelperTool(ToolBase):
         self._pcs: set[int] = set()
         self._root = 0
 
-        self._chord_tracker = ChordTracker()
-
         # Progression recorder.
         self._bpm = 120
         self._bars = 4
@@ -72,15 +90,19 @@ class JamHelperTool(ToolBase):
         self._min_chord_beats = DEFAULT_MIN_CHORD_BEATS
         self._chord_play_beats = DEFAULT_CHORD_PLAY_BEATS
         self._count_in_beats = DEFAULT_COUNT_IN_BEATS
+        self._manual_quant_beats = DEFAULT_MANUAL_QUANT_BEATS
+        self._live_chord_window_beats = DEFAULT_LIVE_CHORD_WINDOW_BEATS
+        self._metronome_rate_beats = DEFAULT_METRONOME_RATE_BEATS
         self._recording = False
         self._rec_start = 0.0
         self._rec_frames: list[tuple[float, object]] = []   # (elapsed, chroma ndarray)
         self._rec_locked: list[Seg] = []                     # finalized slots during recording
         self._progression: list[Seg] = []
-        self._last_snaps: list[str] = []
         self._tap_times: list[float] = []
         self._last_click_seg: int | None = None
         self._last_click_time = 0
+        self._timeline_edit: TimelineEdit | None = None
+        self._timeline_edit_enabled = tk.BooleanVar(value=False)
 
         # Chord selection + progression playback.
         self._selected_chord: Chord | None = None
@@ -93,16 +115,32 @@ class JamHelperTool(ToolBase):
         self._prog_start = 0.0
         self._playback_beat = 0.0
         self._playback_seg_idx = -1
+        self._metronome_last_tick = -1
         self._play_chords_var = tk.BooleanVar(value=False)
         self._loop_var = tk.BooleanVar(value=False)
+        self._metronome_var = tk.BooleanVar(value=False)
+        self._restrict_chords_var = tk.BooleanVar(value=DEFAULT_RESTRICT_CHORDS)
+        self._settings_win: tk.Toplevel | None = None
         self._suggest_win: tk.Toplevel | None = None
         self._chord_edit_win: tk.Toplevel | None = None
         self._edit_seg_idx: int | None = None
         self._edit_preview: list[Chord | None] = [None]
+        self._edit_mode = "timeline"
         self._edit_header: tk.Label | None = None
         self._edit_preview_lbl: tk.Label | None = None
         self._edit_body: tk.Frame | None = None
+        self._edit_clear_btn: tk.Button | None = None
         self._edit_btn_refs: list[tuple[tk.Button, Chord]] = []
+        self._visual_chord_lock: Chord | None = None
+        self._live_chord: Chord | None = None
+        self._live_chord_score = 0.0
+        self._live_chord_progress = 0.0
+        self._live_chord_text = "Chord: --"
+        self._live_chord_fg = MUTED
+        self._live_chord_frames: list[tuple[float, object]] = []
+        self._live_change_candidate: Chord | None = None
+        self._live_change_count = 0
+        self._last_chord_activity = 0.0
 
         # Live mic state.
         self._live_midi: int | None = None
@@ -135,16 +173,14 @@ class JamHelperTool(ToolBase):
         self.scale_var = tk.StringVar(value=self._scale)
         self.scale_combo = self._dark_menu(controls, self.scale_var, M.SCALE_NAMES, self._on_change)
         self.scale_combo.pack(side="left", padx=(6, 0))
-        self.chord_var = tk.StringVar(value="Backing chord: --")
-        tk.Label(controls, textvariable=self.chord_var, bg=BG, fg=MUTED,
-                 font=(FONT, 10, "bold")).pack(side="right")
 
-        self.position_var = tk.StringVar()
-        tk.Label(f, textvariable=self.position_var, bg=BG, fg=ROOT_C,
-                 font=(FONT, 11, "bold"), anchor="w").pack(fill="x", padx=14, pady=(6, 0))
+        scale_row = tk.Frame(f, bg=BG)
+        scale_row.pack(fill="x", padx=14, pady=(6, 0))
         self.recommend_var = tk.StringVar()
-        tk.Label(f, textvariable=self.recommend_var, bg=BG, fg=TEXT,
-                 font=(FONT, 12), anchor="w").pack(fill="x", padx=14)
+        tk.Label(scale_row, textvariable=self.recommend_var, bg=BG, fg=TEXT,
+                 font=(FONT, 12), anchor="w").pack(side="left", fill="x", expand=True)
+        self.diatonic_frame = tk.Frame(scale_row, bg=BG)
+        self.diatonic_frame.pack(side="right")
 
         # --- Progression recorder ---
         rec = ttk.Frame(f)
@@ -167,28 +203,21 @@ class JamHelperTool(ToolBase):
             bg=BG, fg=TEXT, selectcolor=PANEL2, activebackground=BG,
             activeforeground=TEXT, font=(FONT, 9),
         ).pack(side="left", padx=(6, 0))
-        ttk.Label(rec, text="Chord beats").pack(side="left", padx=(10, 2))
-        self.chord_beats_var = tk.StringVar(value=str(self._chord_play_beats))
-        chord_beats_spin = ttk.Spinbox(
-            rec, from_=1, to=16, width=3, textvariable=self.chord_beats_var,
-            command=self._on_chord_beats_change,
+        self.edit_toggle = tk.Checkbutton(
+            rec, text="Edit timeline", variable=self._timeline_edit_enabled,
+            command=self._on_timeline_edit_toggle, indicatoron=False,
+            relief="flat", bg=PANEL2, fg=TEXT, selectcolor=GOLD,
+            activebackground=PANEL, activeforeground=TEXT, font=(FONT, 9),
+            padx=8,
         )
-        chord_beats_spin.pack(side="left")
-        chord_beats_spin.bind("<Return>", self._on_chord_beats_change)
-        chord_beats_spin.bind("<FocusOut>", self._on_chord_beats_change)
-        ttk.Label(rec, text="Count-in").pack(side="left", padx=(10, 2))
-        self.count_in_var = tk.StringVar(value=str(self._count_in_beats))
-        count_in_spin = ttk.Spinbox(
-            rec, from_=0, to=16, width=3, textvariable=self.count_in_var,
-            command=self._on_count_in_change,
-        )
-        count_in_spin.pack(side="left")
-        count_in_spin.bind("<Return>", self._on_count_in_change)
-        count_in_spin.bind("<FocusOut>", self._on_count_in_change)
+        self.edit_toggle.pack(side="left", padx=(6, 0))
         self.suggest_btn = tk.Button(rec, text="Suggest scale", command=self._open_suggest,
                                      relief="flat", bg=PANEL2, fg=TEXT, activebackground=PANEL,
                                      font=(FONT, 9))
         self.suggest_btn.pack(side="left", padx=(6, 0))
+        tk.Button(rec, text="\u2699", command=self._open_settings, relief="flat",
+                  bg=PANEL2, fg=TEXT, activebackground=PANEL, width=3,
+                  font=(FONT, 10, "bold")).pack(side="left", padx=(6, 0))
         ttk.Label(rec, text="BPM").pack(side="left", padx=(12, 2))
         self.bpm_var = tk.StringVar(value=str(self._bpm))
         bpm_spin = ttk.Spinbox(rec, from_=40, to=240, width=5, textvariable=self.bpm_var,
@@ -196,6 +225,12 @@ class JamHelperTool(ToolBase):
         bpm_spin.pack(side="left")
         bpm_spin.bind("<Return>", self._on_grid_change)
         bpm_spin.bind("<FocusOut>", self._on_grid_change)
+        tk.Checkbutton(
+            rec, text="Metronome", variable=self._metronome_var,
+            command=self._on_metronome_toggle,
+            bg=BG, fg=TEXT, selectcolor=PANEL2, activebackground=BG,
+            activeforeground=TEXT, font=(FONT, 9),
+        ).pack(side="left", padx=(6, 0))
         tk.Button(rec, text="Tap", command=self._tap, relief="flat", bg=PANEL2, fg=TEXT,
                   activebackground=PANEL, width=4).pack(side="left", padx=(4, 0))
         ttk.Label(rec, text="Bars").pack(side="left", padx=(12, 2))
@@ -205,37 +240,52 @@ class JamHelperTool(ToolBase):
         bars_spin.pack(side="left")
         bars_spin.bind("<Return>", self._on_grid_change)
         bars_spin.bind("<FocusOut>", self._on_grid_change)
-
-        rec2 = ttk.Frame(f)
-        rec2.pack(fill="x", padx=14, pady=(4, 0))
-        ttk.Label(rec2, text="Beats/bar").pack(side="left")
+        self.chord_beats_var = tk.StringVar(value=str(self._chord_play_beats))
+        self.count_in_var = tk.StringVar(value=str(self._count_in_beats))
         self.beats_var = tk.StringVar(value=str(self._beats_per_bar))
-        beats_spin = ttk.Spinbox(rec2, from_=2, to=12, width=4, textvariable=self.beats_var,
-                                 command=self._on_grid_change)
-        beats_spin.pack(side="left", padx=(4, 16))
-        beats_spin.bind("<Return>", self._on_grid_change)
-        beats_spin.bind("<FocusOut>", self._on_grid_change)
-        ttk.Label(rec2, text="Min chord").pack(side="left")
+        self.manual_quant_var = tk.StringVar(value=str(self._manual_quant_beats))
+        self.metronome_rate_var = tk.StringVar()
+        self.metronome_rate_menu: tk.Menubutton | None = None
         self.min_chord_var = tk.StringVar()
-        self.min_chord_menu = self._dark_menu(
-            rec2, self.min_chord_var, [], self._on_min_chord_change, width=10)
-        self.min_chord_menu.pack(side="left", padx=(4, 0))
+        self.min_chord_menu: tk.Menubutton | None = None
+        self._refresh_metronome_rate_options()
         self._refresh_min_chord_options()
         self.rec_status = tk.StringVar(value="set BPM + bars, then record one loop")
-        tk.Label(rec2, textvariable=self.rec_status, bg=BG, fg=MUTED,
-                 font=(FONT, 9)).pack(side="left", padx=(12, 0))
+        tk.Label(f, textvariable=self.rec_status, bg=BG, fg=MUTED,
+                 font=(FONT, 9), anchor="w").pack(fill="x", padx=14, pady=(4, 0))
+
+        self.timeline_tools = tk.Frame(f, bg=BG)
 
         self.timeline = tk.Canvas(f, height=66, bg=PANEL, highlightthickness=0, cursor="hand2")
         self.timeline.pack(fill="x", padx=14, pady=(4, 0))
         self.timeline.bind("<Configure>", lambda e: self._draw_timeline())
-        self.timeline.bind("<Button-1>", self._on_timeline_click)
+        self.timeline.bind("<ButtonPress-1>", self._on_timeline_press)
+        self.timeline.bind("<B1-Motion>", self._on_timeline_motion)
+        self.timeline.bind("<ButtonRelease-1>", self._on_timeline_release)
+        self.frame.bind_all("<Delete>", self._on_delete_key)
+        self.frame.bind_all("<BackSpace>", self._on_delete_key)
 
         readout = ttk.Frame(f)
         readout.pack(fill="x", padx=14, pady=(6, 0))
         self.note_var = tk.StringVar(value="--")
         self.status_var = tk.StringVar(value="play a note...")
+        self.chord_var = tk.StringVar(value="Chord: --")
         tk.Label(readout, textvariable=self.note_var, bg=BG, fg=TEXT,
                  font=(FONT, 30, "bold"), width=5, anchor="w").pack(side="left")
+        self.live_chord_canvas = tk.Canvas(
+            readout, width=170, height=38, bg=PANEL2, highlightthickness=0,
+            cursor="hand2",
+        )
+        self.live_chord_canvas.pack(side="left", padx=(8, 0), anchor="s", pady=(0, 8))
+        self.live_chord_canvas.bind("<Button-1>", lambda _e: self._open_live_chord_editor())
+        self.live_chord_canvas.bind("<Configure>", lambda _e: self._draw_live_chord_readout())
+        self.live_window_var = tk.IntVar(value=self._live_chord_window_beats)
+        self.live_window_slider = tk.Scale(
+            readout, from_=1, to=8, orient="horizontal", variable=self.live_window_var,
+            command=self._on_live_chord_window_change, length=110, showvalue=True,
+            bg=BG, fg=TEXT, troughcolor=PANEL2, highlightthickness=0,
+        )
+        self.live_window_slider.pack(side="left", padx=(8, 0), anchor="s", pady=(0, 2))
         self.status_lbl = tk.Label(readout, textvariable=self.status_var, bg=BG,
                                    fg=MUTED, font=(FONT, 13, "bold"), anchor="w")
         self.status_lbl.pack(side="left", padx=(14, 0), anchor="s", pady=(0, 8))
@@ -322,11 +372,14 @@ class JamHelperTool(ToolBase):
         labels = [lab for _, lab in opts]
         valid = {b for b, _ in opts}
         if self._min_chord_beats not in valid:
-            self._min_chord_beats = opts[0][0]
+            self._min_chord_beats = (
+                self._beats_per_bar if self._beats_per_bar in valid else opts[0][0]
+            )
         label = next(lab for b, lab in opts if b == self._min_chord_beats)
         self.min_chord_var.set(label)
-        self._set_dark_menu_values(
-            self.min_chord_menu, self.min_chord_var, labels, self._on_min_chord_label)
+        if self.min_chord_menu is not None:
+            self._set_dark_menu_values(
+                self.min_chord_menu, self.min_chord_var, labels, self._on_min_chord_label)
 
     def _on_min_chord_label(self, label: str):
         for beats, lab in self._min_chord_options():
@@ -337,6 +390,68 @@ class JamHelperTool(ToolBase):
 
     def _on_min_chord_change(self):
         self._on_min_chord_label(self.min_chord_var.get())
+
+    def _duration_label(self, beats: int) -> str:
+        bpb = max(1, self._beats_per_bar)
+        if beats == 1:
+            return "1 beat"
+        if beats < bpb:
+            if bpb % beats == 0:
+                return f"1/{bpb // beats} bar"
+            return f"{beats} beats"
+        if beats == bpb:
+            return "1 bar"
+        if beats % bpb == 0:
+            bars = beats // bpb
+            return f"{bars} bars"
+        return f"{beats} beats"
+
+    def _metronome_rate_options(self) -> list[tuple[int, str]]:
+        bpb = self._beats_per_bar
+        total = self._total_beats()
+        seen: set[int] = set()
+        opts: list[tuple[int, str]] = []
+
+        def add(beats: int):
+            if 1 <= beats <= total and beats not in seen:
+                seen.add(beats)
+                opts.append((beats, self._duration_label(beats)))
+
+        for beats in range(1, bpb + 1):
+            if bpb % beats == 0:
+                add(beats)
+        for bars in range(2, min(4, total // bpb) + 1):
+            add(bars * bpb)
+        return sorted(opts, key=lambda item: item[0])
+
+    def _refresh_metronome_rate_options(self):
+        opts = self._metronome_rate_options()
+        labels = [lab for _, lab in opts]
+        valid = {b for b, _ in opts}
+        if self._metronome_rate_beats not in valid:
+            self._metronome_rate_beats = 1 if 1 in valid else opts[0][0]
+        label = next(lab for b, lab in opts if b == self._metronome_rate_beats)
+        self.metronome_rate_var.set(label)
+        if self.metronome_rate_menu is not None:
+            self._set_dark_menu_values(
+                self.metronome_rate_menu, self.metronome_rate_var,
+                labels, self._on_metronome_rate_label)
+
+    def _on_metronome_rate_label(self, label: str):
+        for beats, lab in self._metronome_rate_options():
+            if lab == label:
+                self._metronome_rate_beats = beats
+                break
+        if self._prog_playing:
+            self._metronome_last_tick = int(self._playback_beat // self._metronome_rate_beats)
+
+    def _on_metronome_rate_change(self):
+        self._on_metronome_rate_label(self.metronome_rate_var.get())
+
+    def _on_metronome_toggle(self):
+        if self._prog_playing and self._metronome_var.get():
+            self._metronome_last_tick = -1
+            self._update_metronome(force=True)
 
     def _on_chord_beats_change(self, *_):
         try:
@@ -352,21 +467,211 @@ class JamHelperTool(ToolBase):
             pass
         self.count_in_var.set(str(self._count_in_beats))
 
+    def _on_manual_quant_change(self, *_):
+        try:
+            self._manual_quant_beats = max(1, min(16, int(float(self.manual_quant_var.get()))))
+        except ValueError:
+            pass
+        self.manual_quant_var.set(str(self._manual_quant_beats))
+
+    def _on_live_chord_window_change(self, *_):
+        self._live_chord_window_beats = max(1, min(8, int(self.live_window_var.get())))
+        self._trim_live_chord_window(time.monotonic())
+        self._refresh_live_chord_label()
+
+    def _on_restrict_chords_change(self):
+        self._reset_live_chord_window(clear_current=False)
+        mode = f"{self._key} {self._scale}" if self._restrict_chords_var.get() else "all triads"
+        self.rec_status.set(f"detecting chords: {mode}")
+        self._draw_timeline()
+        if self._chord_editor_open():
+            self._refresh_chord_editor()
+
+    def _on_timeline_edit_toggle(self):
+        enabled = self._timeline_edit_enabled.get()
+        self.edit_toggle.config(bg=GOLD if enabled else PANEL2, fg=BG if enabled else TEXT)
+        self.rec_status.set("timeline edit mode on" if enabled else "timeline edit mode off")
+        self._refresh_timeline_tools()
+        self._draw_timeline()
+
+    def _focus_is_text_input(self) -> bool:
+        focus = self.frame.focus_get()
+        if focus is None:
+            return False
+        try:
+            return focus.winfo_class() in {"Entry", "TEntry", "Spinbox", "TSpinbox", "Text"}
+        except tk.TclError:
+            return False
+
+    def _on_delete_key(self, _event=None):
+        if hasattr(self.app, "active") and self.app.active is not self:
+            return None
+        if self._focus_is_text_input():
+            return None
+        return "break" if self._clear_selected_segment() else None
+
+    def _refresh_timeline_tools(self):
+        if not hasattr(self, "timeline_tools"):
+            return
+        for child in self.timeline_tools.winfo_children():
+            child.destroy()
+
+        if not self._timeline_edit_enabled.get():
+            if self.timeline_tools.winfo_manager():
+                self.timeline_tools.pack_forget()
+            return
+
+        if not self.timeline_tools.winfo_manager():
+            self.timeline_tools.pack(fill="x", padx=14, pady=(4, 0), before=self.timeline)
+
+        idx = self._selected_seg
+        valid = idx is not None and 0 <= idx < len(self._progression)
+        if not self._progression:
+            msg = "Record or create a progression before editing"
+        elif not valid:
+            msg = "Select a timeline slot to edit it"
+        else:
+            seg = self._progression[idx]
+            chord_name = seg.chord.name if seg.chord else "empty"
+            msg = f"Slot {idx + 1}: {chord_name}"
+        tk.Label(self.timeline_tools, text=msg, bg=BG, fg=MUTED,
+                 font=(FONT, 9, "bold")).pack(side="left")
+
+        def add_btn(text: str, command, enabled: bool = True, width: int = 8):
+            tk.Button(
+                self.timeline_tools, text=text, command=command,
+                relief="flat", bg=PANEL2, fg=TEXT, activebackground=PANEL,
+                font=(FONT, 9, "bold"), width=width,
+                state="normal" if enabled else "disabled",
+            ).pack(side="left", padx=(6, 0))
+
+        add_btn("Add" if valid and self._progression[idx].chord is None else "Change",
+                lambda: self._open_chord_editor(self._selected_seg)
+                if self._selected_seg is not None else None,
+                enabled=valid, width=8)
+        add_btn("Clear", self._clear_selected_segment, enabled=valid, width=7)
+
+    # ----- settings -------------------------------------------------------
+
+    def _open_settings(self):
+        if self._settings_win is not None and tk.Toplevel.winfo_exists(self._settings_win):
+            self._settings_win.lift()
+            return
+        win = tk.Toplevel(self.app.root)
+        win.title("Jam Helper settings")
+        win.configure(bg=BG)
+        win.geometry("390x410")
+        win.transient(self.app.root)
+        self._settings_win = win
+
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill="both", expand=True, padx=14, pady=12)
+
+        def spin_row(label: str, sub: str, var: tk.StringVar, frm: int, to: int, command):
+            row = tk.Frame(body, bg=BG)
+            row.pack(fill="x", pady=(0, 10))
+            txt = tk.Frame(row, bg=BG)
+            txt.pack(side="left", fill="x", expand=True)
+            tk.Label(txt, text=label, bg=BG, fg=TEXT,
+                     font=(FONT, 10, "bold")).pack(anchor="w")
+            tk.Label(txt, text=sub, bg=BG, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
+            sp = ttk.Spinbox(row, from_=frm, to=to, width=5, textvariable=var, command=command)
+            sp.pack(side="right", padx=(10, 0))
+            sp.bind("<Return>", command)
+            sp.bind("<FocusOut>", command)
+
+        spin_row("Count-in", "beats clicked before progression playback starts",
+                 self.count_in_var, 0, 16, self._on_count_in_change)
+        spin_row("Beats/bar", "timeline grid and bar numbering",
+                 self.beats_var, 2, 12, self._on_grid_change)
+        spin_row("Chord sound length", "beats a chord rings when chord sounds are enabled",
+                 self.chord_beats_var, 1, 16, self._on_chord_beats_change)
+        spin_row("Manual edit grid", "beat grid used when dragging or resizing chords",
+                 self.manual_quant_var, 1, 16, self._on_manual_quant_change)
+
+        row = tk.Frame(body, bg=BG)
+        row.pack(fill="x", pady=(0, 12))
+        txt = tk.Frame(row, bg=BG)
+        txt.pack(side="left", fill="x", expand=True)
+        tk.Label(txt, text="Metronome rate", bg=BG, fg=TEXT,
+                 font=(FONT, 10, "bold")).pack(anchor="w")
+        tk.Label(txt, text="click interval when the metronome is enabled",
+                 bg=BG, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
+        self.metronome_rate_menu = self._dark_menu(
+            row, self.metronome_rate_var, [], self._on_metronome_rate_change, width=10)
+        self.metronome_rate_menu.pack(side="right", padx=(10, 0))
+        self._refresh_metronome_rate_options()
+
+        row = tk.Frame(body, bg=BG)
+        row.pack(fill="x", pady=(0, 12))
+        txt = tk.Frame(row, bg=BG)
+        txt.pack(side="left", fill="x", expand=True)
+        tk.Label(txt, text="Min chord length", bg=BG, fg=TEXT,
+                 font=(FONT, 10, "bold")).pack(anchor="w")
+        tk.Label(txt, text="smallest recording segment used for chord detection",
+                 bg=BG, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
+        self.min_chord_menu = self._dark_menu(
+            row, self.min_chord_var, [], self._on_min_chord_change, width=10)
+        self.min_chord_menu.pack(side="right", padx=(10, 0))
+        self._refresh_min_chord_options()
+
+        tk.Checkbutton(
+            body, text="Snap detected chords to key/scale",
+            variable=self._restrict_chords_var,
+            bg=BG, fg=TEXT, selectcolor=PANEL2, activebackground=BG,
+            activeforeground=TEXT, font=(FONT, 10),
+            command=self._on_restrict_chords_change,
+        ).pack(anchor="w", pady=(4, 0))
+
+        def close():
+            self._settings_win = None
+            self.min_chord_menu = None
+            self.metronome_rate_menu = None
+            win.destroy()
+
+        tk.Button(body, text="Close", command=close, relief="flat", bg=PANEL2, fg=TEXT,
+                  activebackground=PANEL, width=10).pack(anchor="e", pady=(16, 0))
+        win.protocol("WM_DELETE_WINDOW", close)
+
     # ----- scale state ----------------------------------------------------
 
     def _on_change(self, _event=None):
         self._key = self.key_var.get()
         self._scale = self.scale_var.get()
+        self._reset_live_chord_window(clear_current=False)
         self._recompute()
         self._refresh_views()
+        self._draw_timeline()
+        if self._chord_editor_open():
+            self._refresh_chord_editor()
 
     def _recompute(self):
         self._root = M.root_pc(self._key)
         self._pcs = M.scale_pitch_classes(self._root, self._scale)
-        _, name, use = M.position_label(self._root)
-        self.position_var.set(f"On your C harp: {name}  -  {use}")
         names = [M.NOTE_NAMES[(self._root + i) % 12] for i in M.SCALES[self._scale]]
         self.recommend_var.set(f"Play {self._key} {self._scale}:   " + "   ".join(names))
+        self._refresh_diatonic_chords()
+
+    def _refresh_diatonic_chords(self):
+        if not hasattr(self, "diatonic_frame"):
+            return
+        for child in self.diatonic_frame.winfo_children():
+            child.destroy()
+        for chord, label in M.diatonic_chord_options(self._root, self._scale):
+            text = f"{label} {chord.name}"
+            tk.Button(
+                self.diatonic_frame, text=text,
+                command=lambda ch=chord: self._select_diatonic_chord(ch),
+                relief="flat", bg=PANEL2, fg=TEXT, activebackground=PANEL,
+                font=(FONT, 8, "bold"), padx=5, pady=1,
+            ).pack(side="left", padx=(4, 0))
+
+    def _select_diatonic_chord(self, chord: Chord):
+        if self._visual_chord_lock is not None:
+            self.rec_status.set("visual chord lock is active")
+            return
+        self._select_chord(chord, seg_idx=None, play=True)
+        self.rec_status.set(f"selected {chord.name} from {self._key} {self._scale}")
 
     def _in_scale(self, midi: int) -> bool:
         return (midi % 12) in self._pcs
@@ -375,7 +680,7 @@ class JamHelperTool(ToolBase):
         return (midi % 12) == self._root
 
     def _active_chord(self) -> Chord | None:
-        return self._selected_chord
+        return self._visual_chord_lock or self._selected_chord
 
     def _chord_pcs(self) -> set[int]:
         ch = self._active_chord()
@@ -395,6 +700,103 @@ class JamHelperTool(ToolBase):
         if self._is_chord_root(midi):
             return ("\u25c6", 10, GOLD)
         return ("\u25c7", 8, CHORD_MARK)
+
+    def _chord_candidates(self) -> list[Chord] | None:
+        if not self._restrict_chords_var.get():
+            return None
+        return [ch for ch, _label in M.diatonic_chord_options(self._root, self._scale)]
+
+    def _chord_in_selected_scale(self, chord: Chord | None) -> bool:
+        return chord is not None and M.chord_fits_scale(chord, self._root, self._scale)
+
+    def _reset_live_chord_window(self, clear_current: bool = False):
+        self._live_chord_frames.clear()
+        self._live_change_candidate = None
+        self._live_change_count = 0
+        self._live_chord_progress = 0.0
+        if clear_current:
+            self._live_chord = None
+            self._live_chord_score = 0.0
+        self._refresh_live_chord_label()
+
+    def _trim_live_chord_window(self, now: float):
+        cutoff = now - self._live_chord_window_beats * self._beat_seconds()
+        self._live_chord_frames = [
+            (t, chroma) for t, chroma in self._live_chord_frames if t >= cutoff
+        ]
+        if self._live_chord_frames:
+            span = now - self._live_chord_frames[0][0]
+            window = max(0.001, self._live_chord_window_beats * self._beat_seconds())
+            self._live_chord_progress = max(0.0, min(1.0, span / window))
+        else:
+            self._live_chord_progress = 0.0
+
+    def _draw_live_chord_readout(self):
+        if not hasattr(self, "live_chord_canvas"):
+            return
+        c = self.live_chord_canvas
+        c.delete("all")
+        w, h = max(1, c.winfo_width()), max(1, c.winfo_height())
+        locked = self._visual_chord_lock is not None
+        fill_col = lerp_color(PANEL2, GOLD if locked else ACCENT, 0.38)
+        c.create_rectangle(0, 0, w, h, fill=PANEL2, outline="")
+        fill_w = int(w * self._live_chord_progress)
+        if fill_w > 0:
+            c.create_rectangle(0, 0, fill_w, h, fill=fill_col, outline="")
+        c.create_rectangle(1, 1, w - 1, h - 1, outline=GOLD if locked else ACCENT_DIM,
+                           width=2 if locked else 1)
+        c.create_text(w / 2, h / 2, text=self._live_chord_text,
+                      fill=self._live_chord_fg, font=(FONT, 13, "bold"))
+
+    def _refresh_live_chord_label(self):
+        if self._visual_chord_lock is not None:
+            self._live_chord_text = f"Chord: {self._visual_chord_lock.name} lock"
+            self._live_chord_fg = GOLD
+        elif self._live_chord is not None:
+            self._live_chord_text = f"Chord: {self._live_chord.name}  {self._live_chord_score:.0%}"
+            self._live_chord_fg = TEXT
+        else:
+            self._live_chord_text = "Chord: --"
+            self._live_chord_fg = MUTED
+        self.chord_var.set(self._live_chord_text)
+        self._draw_live_chord_readout()
+
+    def _update_live_chord(self, state):
+        now = time.monotonic()
+        if state.level_fraction <= 0.18:
+            if self._live_chord_frames and now - self._last_chord_activity >= LIVE_CHORD_PAUSE_SECONDS:
+                self._reset_live_chord_window(clear_current=False)
+            return
+
+        self._last_chord_activity = now
+        detector = ChordDetector(candidates=self._chord_candidates())
+        instant = detector.detect(state.chroma, min_confidence=LIVE_CHORD_CHANGE_CONFIDENCE)
+        if (
+            instant is not None
+            and self._live_chord is not None
+            and instant.chord != self._live_chord
+        ):
+            if instant.chord == self._live_change_candidate:
+                self._live_change_count += 1
+            else:
+                self._live_change_candidate = instant.chord
+                self._live_change_count = 1
+            if self._live_change_count >= LIVE_CHORD_CHANGE_FRAMES:
+                self._reset_live_chord_window(clear_current=False)
+        else:
+            self._live_change_candidate = None
+            self._live_change_count = 0
+
+        self._live_chord_frames.append((now, state.chroma.copy()))
+        self._trim_live_chord_window(now)
+        match = detector.aggregate(
+            [chroma for _t, chroma in self._live_chord_frames],
+            min_confidence=LIVE_CHORD_MIN_CONFIDENCE,
+        )
+        if match is not None:
+            self._live_chord = match.chord
+            self._live_chord_score = match.confidence
+        self._refresh_live_chord_label()
 
     def _play_segment_chord(self, seg_idx: int | None = None):
         """Play the chord for a timeline slot for a beat-based duration (playback)."""
@@ -416,6 +818,7 @@ class JamHelperTool(ToolBase):
             self.app.play_chord(chord_midis(chord))
         self._refresh_views()
         self._draw_timeline()
+        self._refresh_timeline_tools()
 
     def _seg_at_beat(self, beat: float) -> tuple[int | None, Seg | None]:
         for i, seg in enumerate(self._progression):
@@ -431,6 +834,7 @@ class JamHelperTool(ToolBase):
         """Reposition the playback clock so the playhead sits on ``beat``."""
         self._prog_start = time.monotonic() - beat * self._beat_seconds()
         self._playback_beat = beat
+        self._metronome_last_tick = int(beat // max(1, self._metronome_rate_beats))
 
     def _jump_to_segment(self, seg_idx: int, play_sound: bool | None = None):
         if seg_idx < 0 or seg_idx >= len(self._progression):
@@ -457,6 +861,16 @@ class JamHelperTool(ToolBase):
     def _loop_seconds(self) -> float:
         return self._total_beats() * self._beat_seconds()
 
+    def _update_metronome(self, force: bool = False):
+        if not self._metronome_var.get():
+            return
+        interval = max(1, self._metronome_rate_beats)
+        tick = int(self._playback_beat // interval)
+        if force or tick != self._metronome_last_tick:
+            self._metronome_last_tick = tick
+            beat = tick * interval
+            self.app.play_click(beat % self._beats_per_bar == 0)
+
     def _on_grid_change(self, *_):
         try:
             self._bpm = max(40, min(240, int(float(self.bpm_var.get()))))
@@ -470,6 +884,7 @@ class JamHelperTool(ToolBase):
             self._beats_per_bar = max(2, min(12, int(float(self.beats_var.get()))))
         except ValueError:
             pass
+        self._refresh_metronome_rate_options()
         self._refresh_min_chord_options()
         self._draw_timeline()
 
@@ -499,11 +914,13 @@ class JamHelperTool(ToolBase):
         self._rec_start = time.monotonic()
         self._rec_frames = []
         self._rec_locked = []
-        self._last_snaps = []
         self._progression = []
+        self._selected_chord = None
+        self._selected_seg = None
         self.rec_btn.config(text="\u25a0 Stop", fg=TEXT)
         self.rec_status.set(f"recording... play one {self._bars}-bar loop")
         self._draw_timeline()
+        self._refresh_timeline_tools()
 
     def _recording_seg_index(self, elapsed: float) -> int:
         beat_elapsed = elapsed / self._beat_seconds()
@@ -518,16 +935,17 @@ class JamHelperTool(ToolBase):
         return [ch for t, ch in self._rec_frames if t0 <= t < t1]
 
     def _lock_rec_segment(self, seg_idx: int):
-        """Finalize one slot: dominant chord + scale snap while recording."""
+        """Finalize one slot using the dominant chord for that recording slice."""
         if seg_idx < len(self._rec_locked):
             return
         seg_beats = self._segment_beats()
         start_b = seg_idx * seg_beats
         end_b = min(self._total_beats(), (seg_idx + 1) * seg_beats)
-        raw = dominant_chord(self._segment_chromas(seg_idx))
-        ch, orig = M.snap_to_scale(raw, self._root, self._scale)
-        if orig is not None and ch is not None:
-            self._last_snaps.append(f"{orig.name}\u2192{ch.name}")
+        ch = dominant_chord(
+            self._segment_chromas(seg_idx),
+            min_score=RECORD_CHORD_MIN_CONFIDENCE,
+            candidates=self._chord_candidates(),
+        )
         self._rec_locked.append(Seg(start_b, end_b - start_b, ch))
 
     def _finalize_recording(self) -> list[Seg]:
@@ -542,11 +960,12 @@ class JamHelperTool(ToolBase):
         self._progression = self._finalize_recording()
         if manual:
             self.rec_status.set("stopped early")
-        elif self._last_snaps:
-            self.rec_status.set("done — snapped: " + ", ".join(self._last_snaps[:4]))
+        elif self._restrict_chords_var.get():
+            self.rec_status.set(f"done - restricted to {self._key} {self._scale}")
         else:
-            self.rec_status.set("done — timeline full")
+            self.rec_status.set("done - timeline full")
         self._draw_timeline()
+        self._refresh_timeline_tools()
 
     def _record_frame(self, state):
         elapsed = time.monotonic() - self._rec_start
@@ -567,7 +986,10 @@ class JamHelperTool(ToolBase):
         self._prog_playing = False
         self._counting_in = False
         self._count_in_clicked = -1
+        self._metronome_last_tick = -1
         self.play_btn.config(text="\u25b6 Play", fg=GREEN)
+        if hasattr(self.app, "stop_audio"):
+            self.app.stop_audio()
         self._refresh_views()
         self._draw_timeline()
 
@@ -601,9 +1023,11 @@ class JamHelperTool(ToolBase):
         self._prog_start = time.monotonic()
         self._playback_beat = 0.0
         self._playback_seg_idx = -1
+        self._metronome_last_tick = -1
         self.play_btn.config(text="\u25a0 Stop", fg=TEXT)
         self.rec_status.set("playing progression...")
         self._sync_playback_selection(force=True)
+        self._update_metronome(force=True)
         if self._play_chords_var.get():
             self._play_segment_chord(0)
 
@@ -644,8 +1068,10 @@ class JamHelperTool(ToolBase):
         if beat >= total:
             if self._loop_var.get():
                 self._jump_to_beat(0.0)
+                self._metronome_last_tick = -1
                 self._playback_seg_idx = -1
                 self._sync_playback_selection(force=True)
+                self._update_metronome(force=True)
                 if self._play_chords_var.get():
                     self._play_segment_chord(0)
             else:
@@ -654,23 +1080,21 @@ class JamHelperTool(ToolBase):
                 self.rec_status.set("playback finished")
                 self._playback_beat = 0.0
                 self._playback_seg_idx = -1
+                self._metronome_last_tick = -1
         else:
             self._playback_beat = beat
             self._sync_playback_selection()
+            self._update_metronome()
         self._draw_timeline()
         self._sync_harp()
         self._sync_piano()
 
     def _apply_seg_chord(self, seg_idx: int, chord: Chord):
-        ch, orig = M.snap_to_scale(chord, self._root, self._scale)
-        if orig is not None and ch is not None:
-            self.rec_status.set(f"snapped {orig.name} \u2192 {ch.name} ({self._key} {self._scale})")
         old = self._progression[seg_idx]
-        self._progression[seg_idx] = Seg(old.start, old.length, ch)
-        self._select_chord(ch, seg_idx=seg_idx, play=False)
-        if orig is None:
-            slot = seg_idx + 1
-            self.rec_status.set(f"slot {slot}: {ch.name}")
+        self._progression[seg_idx] = Seg(old.start, old.length, chord)
+        self._select_chord(chord, seg_idx=seg_idx, play=False)
+        slot = seg_idx + 1
+        self.rec_status.set(f"slot {slot}: {chord.name}")
 
     def _chord_editor_open(self) -> bool:
         return (self._chord_edit_win is not None
@@ -679,7 +1103,17 @@ class JamHelperTool(ToolBase):
     def _open_chord_editor(self, seg_idx: int):
         if seg_idx < 0 or seg_idx >= len(self._progression):
             return
+        self._edit_mode = "timeline"
         self._edit_seg_idx = seg_idx
+        if self._chord_editor_open():
+            self._refresh_chord_editor()
+            return
+        self._build_chord_editor_shell()
+        self._refresh_chord_editor()
+
+    def _open_live_chord_editor(self):
+        self._edit_mode = "visual_lock"
+        self._edit_seg_idx = None
         if self._chord_editor_open():
             self._refresh_chord_editor()
             return
@@ -716,9 +1150,23 @@ class JamHelperTool(ToolBase):
         foot.pack(fill="x", padx=14, pady=12)
 
         def apply():
-            if self._edit_seg_idx is not None and self._edit_preview[0] is not None:
+            if self._edit_preview[0] is None:
+                return
+            if self._edit_mode == "visual_lock":
+                self._visual_chord_lock = self._edit_preview[0]
+                self._refresh_live_chord_label()
+                self._refresh_views()
+                self.rec_status.set(f"visual chord locked: {self._visual_chord_lock.name}")
+            elif self._edit_seg_idx is not None:
                 self._apply_seg_chord(self._edit_seg_idx, self._edit_preview[0])
                 self._refresh_chord_editor()
+
+        def clear_lock():
+            self._visual_chord_lock = None
+            self._refresh_live_chord_label()
+            self._refresh_views()
+            self.rec_status.set("visual chord lock cleared")
+            self._refresh_chord_editor()
 
         def close():
             self._close_chord_editor()
@@ -727,6 +1175,11 @@ class JamHelperTool(ToolBase):
                   font=(FONT, 10, "bold"), width=10).pack(side="right")
         tk.Button(foot, text="Close", command=close, relief="flat", bg=PANEL2, fg=TEXT,
                   width=10).pack(side="right", padx=(0, 8))
+        self._edit_clear_btn = tk.Button(
+            foot, text="Clear lock", command=clear_lock, relief="flat",
+            bg=PANEL2, fg=GOLD, activebackground=PANEL, width=10,
+        )
+        self._edit_clear_btn.pack(side="left")
         win.protocol("WM_DELETE_WINDOW", close)
 
     def _close_chord_editor(self):
@@ -734,14 +1187,72 @@ class JamHelperTool(ToolBase):
             self._chord_edit_win.destroy()
         self._chord_edit_win = None
         self._edit_seg_idx = None
+        self._edit_mode = "timeline"
+
+    def _refresh_live_lock_editor(self):
+        if self._edit_body is None or self._edit_header is None or self._edit_preview_lbl is None:
+            return
+        current = self._visual_chord_lock or self._live_chord
+        self._edit_preview[0] = current
+        self._edit_header.config(text="Visualizer chord lock - click a chord to preview, then Apply")
+        if self._edit_clear_btn is not None:
+            self._edit_clear_btn.pack(side="left")
+
+        for w in self._edit_body.winfo_children():
+            w.destroy()
+        self._edit_btn_refs.clear()
+
+        def refresh_preview():
+            p = self._edit_preview[0]
+            pname = p.name if p else "(none)"
+            cname = current.name if current else "(none)"
+            self._edit_preview_lbl.config(text=f"Lock: {cname}    Preview: {pname}")
+            for btn, ch in self._edit_btn_refs:
+                sel = p is not None and ch == p
+                btn.config(bg=GOLD if sel else PANEL2, fg=BG if sel else TEXT)
+
+        def pick(ch: Chord):
+            self._edit_preview[0] = ch
+            self.app.play_chord(chord_midis(ch))
+            refresh_preview()
+
+        def add_section(title: str):
+            tk.Label(self._edit_body, text=title, bg=BG, fg=GOLD,
+                     font=(FONT, 9, "bold")).pack(anchor="w", pady=(10, 4))
+
+        def add_chord_row(options: list[tuple[Chord, str]], cols: int = 4):
+            row = tk.Frame(self._edit_body, bg=BG)
+            row.pack(fill="x", pady=(0, 4))
+            for i, (ch, lab) in enumerate(options):
+                if i and i % cols == 0:
+                    row = tk.Frame(self._edit_body, bg=BG)
+                    row.pack(fill="x", pady=(0, 4))
+                text = f"{lab}\n{ch.name}" if lab != ch.name else ch.name
+                btn = tk.Button(row, text=text, width=7, relief="flat", bg=PANEL2, fg=TEXT,
+                                activebackground=PANEL, font=(FONT, 9),
+                                command=lambda c=ch: pick(c))
+                btn.pack(side="left", padx=2, pady=2)
+                self._edit_btn_refs.append((btn, ch))
+
+        diatonic = M.diatonic_chord_options(self._root, self._scale)
+        add_section(f"All diatonic ({self._key} {self._scale})")
+        add_chord_row(diatonic, cols=4)
+        add_section("All triads")
+        add_chord_row([(ch, ch.name) for ch in all_triads()], cols=6)
+        refresh_preview()
 
     def _refresh_chord_editor(self):
-        if not self._chord_editor_open() or self._edit_seg_idx is None:
+        if not self._chord_editor_open():
             return
         if self._edit_body is None or self._edit_header is None or self._edit_preview_lbl is None:
             return
+        if self._edit_mode == "visual_lock":
+            self._refresh_live_lock_editor()
+            return
 
         seg_idx = self._edit_seg_idx
+        if seg_idx is None:
+            return
         seg = self._progression[seg_idx]
         current = seg.chord
         self._edit_preview[0] = current
@@ -749,7 +1260,7 @@ class JamHelperTool(ToolBase):
         bar_num = seg.start // self._beats_per_bar + 1
 
         self._edit_header.config(
-            text=f"Slot {slot} (bar {bar_num})  —  click a chord to preview, then Apply")
+            text=f"Slot {slot} (bar {bar_num}) - click a chord to preview, then Apply")
         self._select_chord(current, seg_idx=seg_idx, play=False)
 
         for w in self._edit_body.winfo_children():
@@ -771,7 +1282,7 @@ class JamHelperTool(ToolBase):
             refresh_preview()
 
         def add_section(title: str):
-            tk.Label(self._edit_body, text=title, bg=BG, fg=ROOT_C,
+            tk.Label(self._edit_body, text=title, bg=BG, fg=GOLD,
                      font=(FONT, 9, "bold")).pack(anchor="w", pady=(10, 4))
 
         def add_chord_row(options: list[tuple[Chord, str]], cols: int = 4):
@@ -787,11 +1298,6 @@ class JamHelperTool(ToolBase):
                                 command=lambda c=ch: pick(c))
                 btn.pack(side="left", padx=2, pady=2)
                 self._edit_btn_refs.append((btn, ch))
-
-        nearby = M.nearby_diatonic(current, self._root, self._scale)
-        if nearby:
-            add_section(f"In {self._key} {self._scale} — nearby")
-            add_chord_row(nearby, cols=3)
 
         diatonic = M.diatonic_chord_options(self._root, self._scale)
         add_section(f"All diatonic ({self._key} {self._scale})")
@@ -833,8 +1339,10 @@ class JamHelperTool(ToolBase):
         self._key, self._scale = key, scale
         self.key_var.set(key)
         self.scale_var.set(scale)
+        self._reset_live_chord_window(clear_current=False)
         self._recompute()
         self._refresh_views()
+        self._draw_timeline()
         win.destroy()
         self.rec_status.set(f"using {key} {scale}")
 
@@ -877,6 +1385,7 @@ class JamHelperTool(ToolBase):
                 x0, x1 = seg.start * beat_w, (seg.start + seg.length) * beat_w
                 selected = (i == self._selected_seg)
                 self._draw_block(c, x0, x1, h, seg.chord, selected=selected)
+            self._draw_selected_swap_arrows(c, beat_w)
             if self._prog_playing:
                 ph = self._playback_beat / total * w
                 c.create_line(ph, 0, ph, h, fill=GOLD, width=2)
@@ -908,7 +1417,14 @@ class JamHelperTool(ToolBase):
                 chord = self._rec_locked[i].chord
             else:
                 chromas = self._segment_chromas(i)
-                chord = dominant_chord(chromas) if chromas else None
+                chord = (
+                    dominant_chord(
+                        chromas,
+                        min_score=RECORD_CHORD_MIN_CONFIDENCE,
+                        candidates=self._chord_candidates(),
+                    )
+                    if chromas else None
+                )
             x0 = start_b / total * w
             x1 = end_b / total * w
             # Partial fill for the segment currently being recorded.
@@ -926,11 +1442,254 @@ class JamHelperTool(ToolBase):
         fill = ACCENT if selected else (ACCENT_DIM if chord is not None else "#26292f")
         outline = GOLD if selected else ACCENT
         c.create_rectangle(x0 + 1, 16, x1 - 1, h - 4, fill=fill, outline=outline, width=2 if selected else 1)
+        if chord is not None and not self._chord_in_selected_scale(chord):
+            c.create_text(x0 + 8, h - 12, text="!", fill=RED, font=(FONT, 10, "bold"))
         if chord is not None and x1 - x0 > 22:
             c.create_text((x0 + x1) / 2, (16 + h - 4) / 2, text=chord.name,
                           fill="#fff", font=(FONT, 11, "bold"))
+        elif chord is None and selected and x1 - x0 > 34:
+            c.create_text((x0 + x1) / 2, (16 + h - 4) / 2, text="empty",
+                          fill=MUTED, font=(FONT, 9, "bold"))
 
-    def _on_timeline_click(self, event):
+    def _selected_swap_arrow_bounds(self, beat_w: float | None = None) -> list[tuple[int, float, float, float, float]]:
+        if not self._timeline_edit_enabled.get():
+            return []
+        idx = self._selected_seg
+        if idx is None or idx < 0 or idx >= len(self._progression):
+            return []
+        if beat_w is None:
+            w = self.timeline.winfo_width()
+            total = self._total_beats()
+            if w <= 1 or total <= 0:
+                return []
+            beat_w = w / total
+        seg = self._progression[idx]
+        x0 = seg.start * beat_w
+        x1 = (seg.start + seg.length) * beat_w
+        y0, y1 = 1.0, 15.0
+        size = 18.0
+        out: list[tuple[int, float, float, float, float]] = []
+        if idx > 0:
+            out.append((-1, x0 + 2, y0, min(x0 + 2 + size, x1 - 2), y1))
+        if idx < len(self._progression) - 1:
+            out.append((1, max(x0 + 2, x1 - 2 - size), y0, x1 - 2, y1))
+        return out
+
+    def _draw_selected_swap_arrows(self, c, beat_w: float):
+        for direction, x0, y0, x1, y1 in self._selected_swap_arrow_bounds(beat_w):
+            if x1 - x0 < 8:
+                continue
+            c.create_rectangle(x0, y0, x1, y1, fill=PANEL2, outline=GOLD, width=1)
+            c.create_text((x0 + x1) / 2, (y0 + y1) / 2,
+                          text="\u2190" if direction < 0 else "\u2192",
+                          fill=TEXT, font=(FONT, 9, "bold"))
+
+    def _timeline_swap_arrow_hit(self, x: int, y: int) -> int | None:
+        for direction, x0, y0, x1, y1 in self._selected_swap_arrow_bounds():
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return direction
+        return None
+
+    def _beat_for_x(self, x: float) -> float:
+        w = self.timeline.winfo_width()
+        if w <= 1:
+            return 0.0
+        return max(0.0, min(float(self._total_beats()), x / w * self._total_beats()))
+
+    def _quantize_beat(self, beat: float) -> int:
+        q = max(1, self._manual_quant_beats)
+        return int(round(beat / q) * q)
+
+    def _normalize_progression_starts(self):
+        start = 0
+        out: list[Seg] = []
+        for seg in self._progression:
+            length = max(1, int(seg.length))
+            out.append(Seg(start, length, seg.chord))
+            start += length
+        total = self._total_beats()
+        if out and start != total:
+            last = out[-1]
+            out[-1] = Seg(last.start, max(1, total - last.start), last.chord)
+        self._progression = out
+
+    def _swap_selected_segment(self, direction: int):
+        idx = self._selected_seg
+        if idx is None:
+            return
+        other = idx + direction
+        if other < 0 or other >= len(self._progression):
+            return
+        self._progression[idx], self._progression[other] = (
+            self._progression[other],
+            self._progression[idx],
+        )
+        self._normalize_progression_starts()
+        self._selected_seg = other
+        self._selected_chord = self._progression[other].chord
+        if self._edit_seg_idx == idx:
+            self._edit_seg_idx = other
+        self.rec_status.set(f"moved slot {idx + 1} to {other + 1}")
+        self._refresh_views()
+        self._draw_timeline()
+        self._refresh_timeline_tools()
+        if self._chord_editor_open():
+            self._refresh_chord_editor()
+
+    def _clear_selected_segment(self) -> bool:
+        idx = self._selected_seg
+        if idx is None or idx < 0 or idx >= len(self._progression):
+            return False
+        old = self._progression[idx]
+        self._progression[idx] = Seg(old.start, old.length, None)
+        self._selected_chord = None
+        self.rec_status.set(f"slot {idx + 1} cleared")
+        self._refresh_views()
+        self._draw_timeline()
+        self._refresh_timeline_tools()
+        if self._chord_editor_open():
+            self._refresh_chord_editor()
+        return True
+
+    def _timeline_hit(self, x: int) -> tuple[int | None, str | None]:
+        if not self._progression:
+            return None, None
+        w = self.timeline.winfo_width()
+        total = self._total_beats()
+        if w <= 1 or total <= 0:
+            return None, None
+        beat_w = w / total
+        for i, seg in enumerate(self._progression):
+            x0 = seg.start * beat_w
+            x1 = (seg.start + seg.length) * beat_w
+            if x0 <= x <= x1:
+                if i > 0 and abs(x - x0) <= TIMELINE_EDGE_PX:
+                    return i, "resize-left"
+                if i < len(self._progression) - 1 and abs(x - x1) <= TIMELINE_EDGE_PX:
+                    return i, "resize-right"
+                return i, "drag"
+        return None, None
+
+    def _on_timeline_press(self, event):
+        if self._recording or not self._progression:
+            self._timeline_edit = None
+            return
+        direction = self._timeline_swap_arrow_hit(event.x, event.y)
+        if direction is not None:
+            self._timeline_edit = None
+            self._swap_selected_segment(direction)
+            return
+        idx, mode = self._timeline_hit(event.x)
+        if idx is None or mode is None:
+            self._timeline_edit = None
+            return
+        if not self._timeline_edit_enabled.get():
+            mode = "click"
+        self._timeline_edit = TimelineEdit(
+            mode=mode,
+            idx=idx,
+            start_x=event.x,
+            moved=False,
+            original=list(self._progression),
+        )
+
+    def _on_timeline_motion(self, event):
+        edit = self._timeline_edit
+        if edit is None:
+            return
+        if edit.mode == "click":
+            return
+        if abs(event.x - edit.start_x) < TIMELINE_DRAG_PX and not edit.moved:
+            return
+        edit.moved = True
+        if edit.mode == "drag":
+            self._drag_timeline_segment(edit, event.x)
+        elif edit.mode in ("resize-left", "resize-right"):
+            self._resize_timeline_segment(edit, event.x)
+        self._draw_timeline()
+        self._refresh_timeline_tools()
+        if self._chord_editor_open():
+            self._refresh_chord_editor()
+
+    def _on_timeline_release(self, event):
+        edit = self._timeline_edit
+        self._timeline_edit = None
+        if edit is None:
+            return
+        w = self.timeline.winfo_width()
+        valid_drop = 0 <= event.x <= w
+        if edit.moved:
+            if not valid_drop:
+                self._progression = edit.original
+                self._selected_seg = min(edit.idx, len(self._progression) - 1)
+                self._selected_chord = self._progression[self._selected_seg].chord
+                self.rec_status.set("timeline edit cancelled")
+            self._draw_timeline()
+            self._refresh_timeline_tools()
+            return
+        self._activate_timeline_click(event)
+
+    def _drag_timeline_segment(self, edit: TimelineEdit, x: int):
+        idx = edit.idx
+        w = self.timeline.winfo_width()
+        total = self._total_beats()
+        if w <= 1 or total <= 0:
+            return
+        beat_w = w / total
+        while idx > 0:
+            prev = self._progression[idx - 1]
+            prev_mid = (prev.start + prev.length / 2.0) * beat_w
+            if x >= prev_mid:
+                break
+            self._progression[idx - 1], self._progression[idx] = (
+                self._progression[idx],
+                self._progression[idx - 1],
+            )
+            idx -= 1
+            self._normalize_progression_starts()
+        while idx < len(self._progression) - 1:
+            nxt = self._progression[idx + 1]
+            next_mid = (nxt.start + nxt.length / 2.0) * beat_w
+            if x <= next_mid:
+                break
+            self._progression[idx], self._progression[idx + 1] = (
+                self._progression[idx + 1],
+                self._progression[idx],
+            )
+            idx += 1
+            self._normalize_progression_starts()
+        edit.idx = idx
+        self._selected_seg = idx
+        self._selected_chord = self._progression[idx].chord
+
+    def _resize_timeline_segment(self, edit: TimelineEdit, x: int):
+        idx = edit.idx
+        qbeat = self._quantize_beat(self._beat_for_x(x))
+        min_len = max(1, self._manual_quant_beats)
+        if edit.mode == "resize-right":
+            if idx >= len(self._progression) - 1:
+                return
+            left = self._progression[idx]
+            right = self._progression[idx + 1]
+            lo = left.start + min_len
+            hi = right.start + right.length - min_len
+            boundary = max(lo, min(hi, qbeat))
+            self._progression[idx] = Seg(left.start, boundary - left.start, left.chord)
+            self._progression[idx + 1] = Seg(boundary, right.start + right.length - boundary, right.chord)
+        elif edit.mode == "resize-left":
+            if idx <= 0:
+                return
+            left = self._progression[idx - 1]
+            right = self._progression[idx]
+            lo = left.start + min_len
+            hi = right.start + right.length - min_len
+            boundary = max(lo, min(hi, qbeat))
+            self._progression[idx - 1] = Seg(left.start, boundary - left.start, left.chord)
+            self._progression[idx] = Seg(boundary, right.start + right.length - boundary, right.chord)
+        self._selected_seg = idx
+        self._selected_chord = self._progression[idx].chord
+
+    def _activate_timeline_click(self, event):
         if self._recording or not self._progression:
             return
         w = self.timeline.winfo_width()
@@ -972,6 +1731,7 @@ class JamHelperTool(ToolBase):
                     self._selected_chord = None
                     self._refresh_views()
                     self._draw_timeline()
+                    self._refresh_timeline_tools()
                 return
 
     # ----- lifecycle ------------------------------------------------------
@@ -999,14 +1759,7 @@ class JamHelperTool(ToolBase):
         elif state.silent_frames > NOTE_HOLD_FRAMES:
             self._disp_midi_f = None
 
-        # Live backing-chord estimate (works on the polyphonic room sound).
-        if state.level_fraction > 0.25:
-            ch = self._chord_tracker.update(state.chroma)
-            self.chord_var.set(
-                f"Backing chord: {ch.name}  ({self._chord_tracker.score:.0%})"
-                if ch else "Backing chord: ...")
-        else:
-            self.chord_var.set("Backing chord: --")
+        self._update_live_chord(state)
 
         if self._recording:
             self._record_frame(state)
@@ -1092,20 +1845,19 @@ class JamHelperTool(ToolBase):
             col = lerp_color(col, DARK, 0.45)
         return col
 
-    def _hover_color(self, midi: int) -> str:
-        locs = note_locations(midi)
-        if locs and locs[0].bend_steps == 0:
-            return BLOW_HOVER if "blow" in locs[0].action else DRAW_HOVER
-        return lerp_color(DRAW_HOVER, BLOW_HOVER, 0.5)
-
     def _set_hover_note(self, note):
         if note != self._hover_note:
             self._hover_note = note
             self._refresh_views()
 
-    def _on_harp_hover(self, hole, zone):
+    def _on_harp_hover(self, hole, zone, y=None):
         lad = hole_ladder(hole)
-        note = lad.blow if zone == "blow" else lad.draw if zone == "draw" else None
+        note = (
+            lad.blow if zone == "blow"
+            else lad.draw if zone == "draw"
+            else self._bend_note_at(hole, y) if y is not None
+            else None
+        )
         if (hole, zone) != (self._hover_hole, self._hover_zone) or note != self._hover_note:
             self._hover_hole, self._hover_zone, self._hover_note = hole, zone, note
             self._refresh_views()
@@ -1121,7 +1873,9 @@ class JamHelperTool(ToolBase):
         hw.blow_fill.clear(); hw.draw_fill.clear()
         hw.blow_label_color.clear(); hw.draw_label_color.clear()
         hw.outline.clear()
+        hw.spotlights.clear()
         hw.blow_markers.clear(); hw.draw_markers.clear()
+        hw.hover_zones.clear()
         silent = self._silent_frames > 0
         chord_pcs = self._chord_pcs()
         has_chord = bool(chord_pcs)
@@ -1142,14 +1896,13 @@ class JamHelperTool(ToolBase):
                     mk = self._chord_marker_at(note)
                     if mk is not None:
                         marker_map[hole] = "root" if self._is_chord_root(note) else "chord"
-                elif self._hover_note == note or (self._hover_hole == hole and self._hover_zone == zone):
-                    fill_map[hole] = self._hover_color(note)
-                    label_map[hole] = "#fff"
-
+                if self._hover_note == note:
+                    hw.hover_zones.add((hole, zone))
         if not silent and self._live_midi is not None:
             col = GREEN if self._in_scale(self._live_midi) else RED
             for loc in note_locations(self._live_midi):
                 if loc.bend_steps == 0:
+                    hw.spotlights[(loc.hole, loc.action)] = col
                     hw.outline[(loc.hole, loc.action)] = col
         hw.redraw()
 
@@ -1158,6 +1911,8 @@ class JamHelperTool(ToolBase):
         bx0, bx1 = x0 + 5, x1 - 5
         by0, by1 = top_b + 3, bot_b - 3
         c.create_rectangle(bx0, by0, bx1, by1, outline="#3a3f47", width=1, fill=DARK)
+        if self._hover_hole == hole and self._hover_zone == "mid":
+            draw_hover_glow(c, bx0, by0, bx1, by1)
         c.create_text(bx0 + (bx1 - bx0) * 0.24, (by0 + by1) / 2, text=str(hole),
                       fill="#dfe6ef", font=(FONT, 12, "bold"))
         if not lad.has_bends:
@@ -1178,6 +1933,8 @@ class JamHelperTool(ToolBase):
             else:
                 col, ww = "#555", 4
             c.create_line(bar_x - ww, y, bar_x + ww, y, fill=col, width=2)
+            if self._hover_note == midi:
+                draw_line_glow(c, bar_x - ww - 2, y, bar_x + ww + 2, y, HOVER_GLOW)
             mk = self._chord_marker_at(midi)
             if mk:
                 glyph, size, mcol = mk
@@ -1200,6 +1957,7 @@ class JamHelperTool(ToolBase):
     def _sync_piano(self):
         pw = self.piano
         pw.fills.clear(); pw.outlines.clear()
+        pw.spotlights.clear()
         pw.markers.clear(); pw.marker_colors.clear()
         chord_pcs = self._chord_pcs()
         has_chord = bool(chord_pcs)
@@ -1215,7 +1973,8 @@ class JamHelperTool(ToolBase):
                     pw.marker_colors[midi] = CHORD_MARK
                     pw.outlines[midi] = GOLD
         if self._silent_frames == 0 and self._live_midi is not None:
-            pw.outlines[self._live_midi] = (
-                GREEN if self._in_scale(self._live_midi) else RED)
+            col = GREEN if self._in_scale(self._live_midi) else RED
+            pw.spotlights[self._live_midi] = col
+            pw.outlines[self._live_midi] = col
         pw.hover_note = self._hover_note
         pw.redraw()

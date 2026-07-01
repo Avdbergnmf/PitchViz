@@ -1,4 +1,4 @@
-"""Music-theory helpers: keys, scales, and harmonica positions.
+"""Music-theory helpers: keys, scales, and chord fit.
 
 GUI-free so it can be reused and tested. Used by the Jam Helper tool to turn a
 backing-track key into a set of recommended notes.
@@ -50,38 +50,6 @@ def degree_of(midi: int, root: int, scale: str) -> int | None:
     return ivs.index(interval) if interval in ivs else None
 
 
-# --- Harmonica positions ----------------------------------------------------
-# Position number tells you which "key" you're playing on a given harp. Each
-# step up the circle of fifths (+7 semitones) is the next position.
-POSITION_INFO: dict[int, tuple[str, str]] = {
-    1: ("1st position (straight harp)", "major / folk, melody playing"),
-    2: ("2nd position (cross harp)", "blues & rock - bluesy dominant sound"),
-    3: ("3rd position (slant)", "minor / Dorian - moody, jazzy"),
-    4: ("4th position", "minor (natural minor flavor)"),
-    5: ("5th position", "minor / Phrygian"),
-    6: ("6th position", "diminished / advanced"),
-    12: ("12th position", "major (bright, soft)"),
-}
-
-
-def position_for(track_root: int, harp_root: int = 0) -> int:
-    """Which position the track key sits in on the given harp (default C harp).
-
-    Position n's root is harp_root + 7*(n-1) (mod 12) on the circle of fifths.
-    """
-    for n in range(1, 13):
-        if (harp_root + 7 * (n - 1)) % 12 == track_root:
-            return n
-    return 1
-
-
-def position_label(track_root: int, harp_root: int = 0) -> tuple[int, str, str]:
-    """(position_number, name, typical_use) for the track key on the harp."""
-    n = position_for(track_root, harp_root)
-    name, use = POSITION_INFO.get(n, (f"{n}th position", "advanced"))
-    return n, name, use
-
-
 # --- Diatonic triads + scale suggestions ------------------------------------
 
 # Expected triad quality per scale degree (major / natural minor).
@@ -127,53 +95,11 @@ def diatonic_chord_options(root: int, scale: str) -> list[tuple["Chord", str]]:
     return [(Chord(pc, q), lab) for (pc, q), lab in zip(triads, labels)]
 
 
-def chord_closeness(a, b) -> float:
-    """Higher = more related (shared tones, nearby root)."""
-    if a is None or b is None:
-        return 0.0
-    shared = len(set(a.notes) & set(b.notes))
-    rd = min((a.root - b.root) % 12, (b.root - a.root) % 12)
-    return shared * 10.0 - rd * 0.5
-
-
 def chord_fits_scale(ch, root: int, scale: str) -> bool:
     """True if the chord is a diatonic triad in the key/scale."""
     if ch is None:
         return False
     return (ch.root, ch.quality) in set(diatonic_triads(root, scale))
-
-
-def snap_to_scale(
-    ch,
-    root: int,
-    scale: str,
-    min_closeness: float = 15.0,
-) -> tuple["Chord | None", "Chord | None"]:
-    """If ``ch`` is outside the scale, maybe return a close diatonic substitute.
-
-    Returns ``(result, original)`` where ``original`` is set only when a snap
-    happened. ``min_closeness`` needs ~15 for one shared tone + nearby root, ~25
-    for two shared tones.
-    """
-    if ch is None:
-        return None, None
-    if chord_fits_scale(ch, root, scale):
-        return ch, None
-    opts = diatonic_chord_options(root, scale)
-    if not opts:
-        return ch, None
-    best_ch, _ = max(opts, key=lambda item: chord_closeness(ch, item[0]))
-    if chord_closeness(ch, best_ch) >= min_closeness:
-        return best_ch, ch
-    return ch, None
-
-
-def nearby_diatonic(current, root: int, scale: str, limit: int = 6) -> list[tuple["Chord", str]]:
-    """Scale chords closest to ``current``, best matches first (excludes exact match)."""
-    opts = diatonic_chord_options(root, scale)
-    ranked = sorted(opts, key=lambda item: chord_closeness(current, item[0]), reverse=True)
-    out = [(c, lab) for c, lab in ranked if c != current]
-    return out[:limit] if out else ranked[:limit]
 
 
 def score_progression(chords, root: int, scale: str) -> float:
