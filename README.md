@@ -1,8 +1,13 @@
 # PitchViz
 
-A small desktop app for practicing **harmonica bends**. It listens to your mic
-and shows the note you're playing, the bends you can reach, and how close you
-are to hitting and holding them.
+A small desktop **harmonica toolkit** (key of **C**). It listens to your mic and
+hosts a set of tools as tabs:
+
+- **Bend Trainer** - shows the note you're playing, the bends you can reach, and
+  how close you are to hitting and holding them.
+- **Jam Helper** - pick a backing-track key + scale and it shows which notes to
+  play (and which need bends), whether the note you're playing fits, and the
+  harmonica position to use.
 
 Target instrument: standard 10-hole diatonic harmonica, key of **C**.
 
@@ -16,15 +21,21 @@ Requires Python 3.10+.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python app.py
+python run.py
 ```
 
-(`tkinter` ships with Python, so there's nothing else to install.)
+(`tkinter` ships with Python, so there's nothing else to install. You can also
+launch with `python -m pitchviz`.)
 
 ## How to use it
 
+- **Tabs** (top): switch between tools. The shared input bar and level meter
+  apply to whichever tool is open.
 - **Input level** (top): drag the marker to set the detection threshold (how
   loud a sound must be before it's detected).
+
+### Bend Trainer
+
 - **Harmonica diagram**: click a hole's **top** to hear its blow note, **bottom**
   for its draw note, or the **middle (lock button)** to lock that hole for
   practice. The lock button shows the hole number and a mini bend-bar.
@@ -37,24 +48,56 @@ python app.py
     while a hole is **locked**.
 - **Piano**: shows the detected note (outline) and the selected hole's blow/draw
   keys. Hovering a note anywhere highlights it everywhere.
-- **Top-right**: **mute** playback, or open **settings** (peak inertia, marker
-  smoothing, hold-to-succeed seconds, reset all).
+- **Mute** (top bar) silences playback; the **gear** (in the tab) opens settings
+  (peak inertia, marker smoothing, hold-to-succeed seconds, reset all).
+
+### Jam Helper
+
+- Pick the **backing track key** and a **scale** (Major, Minor, Major/Minor
+  pentatonic, Blues). The recommended notes light up on the piano and harmonica
+  in the breath colors (**blue = blow**, **orange = draw**), with a **gold edge**
+  marking the **root**. Bend ticks in a hole's middle show which scale notes you
+  reach by bending, and a live needle tracks your exact pitch so you can see when
+  you're *between* notes.
+- It tells you the **harmonica position** to play in (e.g. *G track -> 2nd
+  position / cross harp*).
+- As you play, every reed that makes the note is outlined **green** if it fits
+  the scale (so duplicates like 2-draw / 3-blow light together), **red** if not.
+- **Click a bend tick** to jump straight to the Bend Trainer, locked on that
+  hole with the bend set as your goal.
 
 ## Project layout
 
-| File | Purpose |
-| --- | --- |
-| `app.py` | The full GUI app |
-| `pitch.py` | Pitch detection + note math |
-| `harmonica.py` | C-harmonica note/hole/bend mapping |
-| `synth.py` | Tone + success-chime playback |
-| `level_meter.py` | Audio capture + level helpers |
+The app is a tabbed shell that hosts independent tools. Code is split so tools
+are easy to add or remove.
+
+```
+run.py                  # entry point (python run.py)
+pitchviz/
+  shell.py              # window + tab bar; owns the shared audio engine
+  core/                 # shared, GUI-free logic
+    audio.py            #   mic engine (one input stream for all tools)
+    pitch.py            #   pitch detection + note math
+    harmonica.py        #   C-harmonica note/hole/bend mapping
+    music.py            #   keys, scales, harmonica positions
+    synth.py            #   tone + success-chime playback
+    theme.py            #   shared colors / fonts
+  widgets/              # reusable Tk canvases
+    piano.py  harmonica.py  levelmeter.py
+  tools/                # one module per tab
+    base.py             #   tool interface
+    bend_trainer.py     #   Bend Trainer tool
+    jam_helper.py       #   Jam Helper tool
+```
+
+**Adding a tool:** subclass `ToolBase`, build into `self.frame`, and add it to
+the `TOOLS` list in `pitchviz/shell.py`. Removing one is deleting it from that
+list.
 
 ## Extra tools (optional)
 
 ```powershell
-python pitch_console.py    # live pitch readings in the terminal
-python pitch.py            # pitch-detection self-test (no mic)
-python harmonica.py        # note/hole/bend mapping self-test
-python level_meter.py      # standalone mic level meter
+python pitch_console.py                 # live pitch readings in the terminal
+python -m pitchviz.core.pitch           # pitch-detection self-test (no mic)
+python -m pitchviz.core.harmonica       # note/hole/bend mapping self-test
 ```

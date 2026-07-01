@@ -1,18 +1,18 @@
-"""PitchViz - harmonica layout and note -> hole mapping (key of C).
+"""Harmonica layout and note -> hole mapping (key of C).
 
 Standard 10-hole diatonic harmonica in C (Richter tuning). Maps any MIDI
 note to the hole(s) and breath action(s) that produce it, including the
 common draw/blow bends.
 
 Run directly for a self-test:
-    python harmonica.py
+    python -m pitchviz.core.harmonica
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pitch import NOTE_NAMES, note_to_freq
+from .pitch import NOTE_NAMES, note_to_freq
 
 # Per hole: natural blow/draw notes (MIDI) and the chromatic bend steps
 # reachable from each. Bends are listed shallowest-first (1 semitone, then 2...).

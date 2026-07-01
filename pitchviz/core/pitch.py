@@ -1,13 +1,13 @@
-"""PitchViz - Bucket 2: pitch detection core.
+"""Pitch detection core.
 
 Pure-math helpers with no audio or GUI dependencies, so they can be unit
-tested and reused by later buckets:
+tested and reused freely:
 
 - detect_pitch(samples, samplerate) -> frequency in Hz (or None)
 - freq_to_note(freq) -> (note_name, cents_offset, midi_number)
 
 Run this file directly for a quick self-test against synthetic sine waves:
-    python pitch.py
+    python -m pitchviz.core.pitch
 """
 
 from __future__ import annotations

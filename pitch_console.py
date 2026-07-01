@@ -17,8 +17,8 @@ import sys
 import numpy as np
 import sounddevice as sd
 
-from level_meter import list_input_devices
-from pitch import detect_pitch, freq_to_note
+from pitchviz.core.audio import list_input_devices
+from pitchviz.core.pitch import detect_pitch, freq_to_note
 
 SAMPLERATE = 44100
 # Larger block = better low-frequency resolution at the cost of latency.
