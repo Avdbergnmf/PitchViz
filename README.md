@@ -7,11 +7,13 @@ hosts a set of tools as tabs:
   how close you are to hitting and holding them.
 - **Jam Helper** - pick a backing-track key + scale and it shows which notes to
   play (and which need bends), whether the note you're playing fits, and the
-  harmonica position to use.
+  backing chords on the harmonica and piano.
 
 Target instrument: standard 10-hole diatonic harmonica, key of **C**.
 
-![PitchViz screenshot](assets/screenshot.png)
+![PitchViz Bend Trainer](assets/bendtrainer.png)
+
+![PitchViz Jam Helper](assets/jamhelper.png)
 
 ## Quick start
 
@@ -59,10 +61,13 @@ launch with `python -m pitchviz`.)
   marking the **root**. Bend ticks in a hole's middle show which scale notes you
   reach by bending, and a live needle tracks your exact pitch so you can see when
   you're *between* notes.
-- It tells you the **harmonica position** to play in (e.g. *G track -> 2nd
-  position / cross harp*).
 - As you play, every reed that makes the note is outlined **green** if it fits
   the scale (so duplicates like 2-draw / 3-blow light together), **red** if not.
+- Use the progression recorder to detect backing chords into a timeline. Chords
+  can be snapped to the selected key/scale, edited manually, cleared into silent
+  pauses, and played back with optional chord sounds and metronome clicks.
+- Chord tones are marked on the harmonica and piano; detected live notes also
+  get an in-box spotlight so root outlines do not hide the detection.
 - **Click a bend tick** to jump straight to the Bend Trainer, locked on that
   hole with the bend set as your goal.
 
@@ -79,7 +84,7 @@ pitchviz/
     audio.py            #   mic engine (one input stream for all tools)
     pitch.py            #   pitch detection + note math
     harmonica.py        #   C-harmonica note/hole/bend mapping
-    music.py            #   keys, scales, harmonica positions
+    music.py            #   keys, scales, diatonic chords
     synth.py            #   tone + success-chime playback
     theme.py            #   shared colors / fonts
   widgets/              # reusable Tk canvases
