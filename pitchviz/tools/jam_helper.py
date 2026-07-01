@@ -10,10 +10,11 @@ Trainer; only the highlight logic differs.
 
 from __future__ import annotations
 
+import json
 import time
 import tkinter as tk
 from dataclasses import dataclass
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 
 from ..core import music as M
 from ..core.audio import NOTE_HOLD_FRAMES
@@ -53,6 +54,8 @@ LIVE_CHORD_MIN_CONFIDENCE = 0.12
 LIVE_CHORD_CHANGE_CONFIDENCE = 0.48
 LIVE_CHORD_PAUSE_SECONDS = 0.35
 LIVE_CHORD_CHANGE_FRAMES = 2
+SESSION_FORMAT = "pitchviz.jam-session"
+SESSION_VERSION = 1
 
 
 @dataclass
@@ -123,6 +126,7 @@ class JamHelperTool(ToolBase):
         self._settings_win: tk.Toplevel | None = None
         self._suggest_win: tk.Toplevel | None = None
         self._chord_edit_win: tk.Toplevel | None = None
+        self._session_json_win: tk.Toplevel | None = None
         self._edit_seg_idx: int | None = None
         self._edit_preview: list[Chord | None] = [None]
         self._edit_mode = "timeline"
@@ -218,6 +222,15 @@ class JamHelperTool(ToolBase):
         tk.Button(rec, text="\u2699", command=self._open_settings, relief="flat",
                   bg=PANEL2, fg=TEXT, activebackground=PANEL, width=3,
                   font=(FONT, 10, "bold")).pack(side="left", padx=(6, 0))
+        tk.Button(rec, text="Save", command=self._save_session_json, relief="flat",
+                  bg=PANEL2, fg=TEXT, activebackground=PANEL,
+                  font=(FONT, 9)).pack(side="left", padx=(6, 0))
+        tk.Button(rec, text="Load", command=self._load_session_json_file, relief="flat",
+                  bg=PANEL2, fg=TEXT, activebackground=PANEL,
+                  font=(FONT, 9)).pack(side="left", padx=(4, 0))
+        tk.Button(rec, text="JSON", command=self._open_session_json_modal, relief="flat",
+                  bg=PANEL2, fg=TEXT, activebackground=PANEL,
+                  font=(FONT, 9)).pack(side="left", padx=(4, 0))
         ttk.Label(rec, text="BPM").pack(side="left", padx=(12, 2))
         self.bpm_var = tk.StringVar(value=str(self._bpm))
         bpm_spin = ttk.Spinbox(rec, from_=40, to=240, width=5, textvariable=self.bpm_var,
@@ -632,6 +645,420 @@ class JamHelperTool(ToolBase):
         tk.Button(body, text="Close", command=close, relief="flat", bg=PANEL2, fg=TEXT,
                   activebackground=PANEL, width=10).pack(anchor="e", pady=(16, 0))
         win.protocol("WM_DELETE_WINDOW", close)
+
+    # ----- session JSON ---------------------------------------------------
+
+    def _chord_to_json(self, chord: Chord | None):
+        if chord is None:
+            return None
+        return {"name": chord.name, "root": chord.root, "quality": chord.quality}
+
+    def _session_dict(self) -> dict:
+        return {
+            "format": SESSION_FORMAT,
+            "version": SESSION_VERSION,
+            "bpm": self._bpm,
+            "key": self._key,
+            "scale": self._scale,
+            "length": {
+                "bars": self._bars,
+                "beatsPerBar": self._beats_per_bar,
+                "totalBeats": self._total_beats(),
+            },
+            "settings": {
+                "countInBeats": self._count_in_beats,
+                "minChordBeats": self._min_chord_beats,
+                "chordSoundBeats": self._chord_play_beats,
+                "manualQuantBeats": self._manual_quant_beats,
+                "liveChordWindowBeats": self._live_chord_window_beats,
+                "snapDetectedChordsToScale": self._restrict_chords_var.get(),
+                "chordSounds": self._play_chords_var.get(),
+                "loop": self._loop_var.get(),
+                "metronome": self._metronome_var.get(),
+                "metronomeRateBeats": self._metronome_rate_beats,
+                "editTimeline": self._timeline_edit_enabled.get(),
+            },
+            "chords": [
+                {
+                    "start": seg.start,
+                    "length": seg.length,
+                    "chord": self._chord_to_json(seg.chord),
+                }
+                for seg in self._progression
+            ],
+        }
+
+    def _session_json_text(self) -> str:
+        return json.dumps(self._session_dict(), indent=2)
+
+    def _save_session_json(self):
+        name = f"pitchviz-{self._key.lower()}-{self._scale.lower().replace(' ', '-')}.json"
+        path = filedialog.asksaveasfilename(
+            parent=self.app.root,
+            title="Save jam session",
+            initialfile=name,
+            defaultextension=".json",
+            filetypes=(("Jam session JSON", "*.json"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self._session_json_text())
+                fh.write("\n")
+        except OSError as exc:
+            messagebox.showerror("Save jam session", f"Could not save file:\n{exc}")
+            return
+        self.rec_status.set(f"saved jam session: {path}")
+
+    def _load_session_json_file(self):
+        path = filedialog.askopenfilename(
+            parent=self.app.root,
+            title="Load jam session",
+            filetypes=(("Jam session JSON", "*.json"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            messagebox.showerror("Load jam session", f"Could not read file:\n{exc}")
+            return
+        patch, errors = self._validate_session_json_text(text)
+        if errors:
+            messagebox.showerror("Invalid jam session JSON", self._format_json_errors(errors))
+            return
+        self._apply_session_patch(patch)
+        self.rec_status.set(f"loaded jam session: {path}")
+
+    def _open_session_json_modal(self):
+        if self._session_json_win is not None and tk.Toplevel.winfo_exists(self._session_json_win):
+            self._session_json_win.lift()
+            return
+        win = tk.Toplevel(self.app.root)
+        win.title("Jam session JSON")
+        win.configure(bg=BG)
+        win.geometry("660x560")
+        win.transient(self.app.root)
+        self._session_json_win = win
+
+        tk.Label(
+            win,
+            text="Current jam session JSON. Paste another session and validate before applying.",
+            bg=BG, fg=TEXT, font=(FONT, 10, "bold"),
+        ).pack(anchor="w", padx=14, pady=(12, 6))
+
+        outer = tk.Frame(win, bg=BG)
+        outer.pack(fill="both", expand=True, padx=14)
+        text = tk.Text(
+            outer, wrap="none", bg=PANEL, fg=TEXT, insertbackground=TEXT,
+            relief="flat", font=("Consolas", 9), undo=True,
+        )
+        yscroll = tk.Scrollbar(outer, orient="vertical", command=text.yview)
+        xscroll = tk.Scrollbar(outer, orient="horizontal", command=text.xview)
+        text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        outer.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+        text.insert("1.0", self._session_json_text())
+
+        status_var = tk.StringVar(value="Not validated")
+        status = tk.Label(win, textvariable=status_var, bg=BG, fg=MUTED,
+                          font=(FONT, 9), anchor="w")
+        status.pack(fill="x", padx=14, pady=(8, 0))
+
+        foot = tk.Frame(win, bg=BG)
+        foot.pack(fill="x", padx=14, pady=12)
+
+        def current_text() -> str:
+            return text.get("1.0", "end-1c")
+
+        def validate_only():
+            _patch, errors = self._validate_session_json_text(current_text())
+            if errors:
+                status.config(fg=RED)
+                status_var.set(self._format_json_errors(errors, max_items=3))
+                return False
+            status.config(fg=GREEN)
+            status_var.set("Valid jam session JSON")
+            return True
+
+        def apply_json():
+            patch, errors = self._validate_session_json_text(current_text())
+            if errors:
+                status.config(fg=RED)
+                status_var.set(self._format_json_errors(errors, max_items=3))
+                return
+            self._apply_session_patch(patch)
+            status.config(fg=GREEN)
+            status_var.set("Applied jam session JSON")
+
+        def close():
+            self._session_json_win = None
+            win.destroy()
+
+        tk.Button(foot, text="Apply", command=apply_json, relief="flat", bg=GREEN,
+                  fg=BG, font=(FONT, 10, "bold"), width=10).pack(side="right")
+        tk.Button(foot, text="Validate", command=validate_only, relief="flat", bg=PANEL2,
+                  fg=TEXT, activebackground=PANEL, width=10).pack(side="right", padx=(0, 8))
+        tk.Button(foot, text="Close", command=close, relief="flat", bg=PANEL2,
+                  fg=TEXT, activebackground=PANEL, width=10).pack(side="right", padx=(0, 8))
+        win.protocol("WM_DELETE_WINDOW", close)
+
+    def _format_json_errors(self, errors: list[str], max_items: int = 8) -> str:
+        shown = errors[:max_items]
+        extra = len(errors) - len(shown)
+        msg = "\n".join(f"- {err}" for err in shown)
+        if extra > 0:
+            msg += f"\n- ...and {extra} more"
+        return msg
+
+    def _validate_session_json_text(self, text: str) -> tuple[dict, list[str]]:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return {}, [f"Invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"]
+        if not isinstance(data, dict):
+            return {}, ["Session JSON must be an object"]
+        return self._validate_session_data(data)
+
+    def _validate_session_data(self, data: dict) -> tuple[dict, list[str]]:
+        errors: list[str] = []
+        patch: dict = {}
+
+        def read_int(container: dict, key: str, label: str, lo: int, hi: int):
+            if key not in container:
+                return None
+            value = container[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or int(value) != value:
+                errors.append(f"{label} must be an integer")
+                return None
+            value = int(value)
+            if value < lo or value > hi:
+                errors.append(f"{label} must be between {lo} and {hi}")
+                return None
+            return value
+
+        def read_bool(container: dict, key: str, label: str):
+            if key not in container:
+                return None
+            value = container[key]
+            if not isinstance(value, bool):
+                errors.append(f"{label} must be true or false")
+                return None
+            return value
+
+        bpm = read_int(data, "bpm", "bpm", 40, 240)
+        if bpm is not None:
+            patch["bpm"] = bpm
+
+        if "key" in data:
+            if data["key"] in M.KEY_NAMES:
+                patch["key"] = data["key"]
+            else:
+                errors.append("key must be one of: " + ", ".join(M.KEY_NAMES))
+        if "scale" in data:
+            if data["scale"] in M.SCALE_NAMES:
+                patch["scale"] = data["scale"]
+            else:
+                errors.append("scale must be one of: " + ", ".join(M.SCALE_NAMES))
+
+        if "length" in data:
+            length = data["length"]
+            if not isinstance(length, dict):
+                errors.append("length must be an object")
+            else:
+                bars = read_int(length, "bars", "length.bars", 1, 32)
+                if bars is not None:
+                    patch["bars"] = bars
+                beats = read_int(length, "beatsPerBar", "length.beatsPerBar", 2, 12)
+                if beats is not None:
+                    patch["beats_per_bar"] = beats
+
+        target_bars = patch.get("bars", self._bars)
+        target_bpb = patch.get("beats_per_bar", self._beats_per_bar)
+        target_total = target_bars * target_bpb
+
+        if "settings" in data:
+            settings = data["settings"]
+            if not isinstance(settings, dict):
+                errors.append("settings must be an object")
+            else:
+                int_settings = (
+                    ("countInBeats", "count_in_beats", "settings.countInBeats", 0, 16),
+                    ("minChordBeats", "min_chord_beats", "settings.minChordBeats", 1, target_total),
+                    ("chordSoundBeats", "chord_play_beats", "settings.chordSoundBeats", 1, 16),
+                    ("manualQuantBeats", "manual_quant_beats", "settings.manualQuantBeats", 1, 16),
+                    ("liveChordWindowBeats", "live_chord_window_beats", "settings.liveChordWindowBeats", 1, 8),
+                    ("metronomeRateBeats", "metronome_rate_beats", "settings.metronomeRateBeats", 1, target_total),
+                )
+                for key, dest, label, lo, hi in int_settings:
+                    value = read_int(settings, key, label, lo, hi)
+                    if value is not None:
+                        patch[dest] = value
+                bool_settings = (
+                    ("snapDetectedChordsToScale", "restrict_chords", "settings.snapDetectedChordsToScale"),
+                    ("chordSounds", "play_chords", "settings.chordSounds"),
+                    ("loop", "loop", "settings.loop"),
+                    ("metronome", "metronome", "settings.metronome"),
+                    ("editTimeline", "timeline_edit", "settings.editTimeline"),
+                )
+                for key, dest, label in bool_settings:
+                    value = read_bool(settings, key, label)
+                    if value is not None:
+                        patch[dest] = value
+
+        if "chords" in data:
+            chords = data["chords"]
+            if not isinstance(chords, list):
+                errors.append("chords must be a list")
+            else:
+                segs: list[Seg] = []
+                next_start = 0
+                for i, item in enumerate(chords):
+                    label = f"chords[{i}]"
+                    if not isinstance(item, dict):
+                        errors.append(f"{label} must be an object")
+                        continue
+                    start = read_int(item, "start", f"{label}.start", 0, target_total)
+                    if start is None and "start" not in item:
+                        start = next_start
+                    length = read_int(item, "length", f"{label}.length", 1, target_total)
+                    if length is None:
+                        continue
+                    if start is None:
+                        continue
+                    if start + length > target_total:
+                        errors.append(f"{label} extends past the session length")
+                        continue
+                    chord = self._parse_session_chord(item.get("chord"), f"{label}.chord", errors)
+                    segs.append(Seg(start, length, chord))
+                    next_start = start + length
+                if not errors:
+                    patch["progression"] = segs
+
+        return patch, errors
+
+    def _parse_session_chord(self, value, label: str, errors: list[str]) -> Chord | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return self._parse_session_chord_name(value, label, errors)
+        if not isinstance(value, dict):
+            errors.append(f"{label} must be null, a chord name, or an object")
+            return None
+
+        root: int | None = None
+        quality: str | None = None
+        if "name" in value:
+            parsed = self._parse_session_chord_name(value["name"], f"{label}.name", errors)
+            if parsed is not None:
+                root, quality = parsed.root, parsed.quality
+        if "root" in value:
+            rv = value["root"]
+            if isinstance(rv, bool):
+                errors.append(f"{label}.root must be a pitch class number or note name")
+            elif isinstance(rv, (int, float)) and int(rv) == rv and 0 <= int(rv) <= 11:
+                root = int(rv)
+            elif isinstance(rv, str) and rv in M.NOTE_NAMES:
+                root = M.NOTE_NAMES.index(rv)
+            else:
+                errors.append(f"{label}.root must be 0..11 or one of: " + ", ".join(M.NOTE_NAMES))
+        if "quality" in value:
+            qv = value["quality"]
+            aliases = {"maj": "maj", "major": "maj", "min": "min", "minor": "min"}
+            if isinstance(qv, str) and qv in aliases:
+                quality = aliases[qv]
+            else:
+                errors.append(f"{label}.quality must be maj or min")
+        if root is None:
+            errors.append(f"{label} is missing a valid root")
+            return None
+        if quality is None:
+            errors.append(f"{label} is missing a valid quality")
+            return None
+        return Chord(root, quality)
+
+    def _parse_session_chord_name(self, name, label: str, errors: list[str]) -> Chord | None:
+        if not isinstance(name, str) or not name:
+            errors.append(f"{label} must be a chord name like C or Am")
+            return None
+        quality = "min" if name.endswith("m") and len(name) > 1 else "maj"
+        root_name = name[:-1] if quality == "min" else name
+        if root_name not in M.NOTE_NAMES:
+            errors.append(f"{label} has an unknown root: {root_name}")
+            return None
+        return Chord(M.NOTE_NAMES.index(root_name), quality)
+
+    def _apply_session_patch(self, patch: dict):
+        if self._recording:
+            self._recording = False
+            self.rec_btn.config(text="\u25cf Record", fg=RED)
+        if self._counting_in or self._prog_playing:
+            self._stop_playback()
+
+        if "bpm" in patch:
+            self._bpm = patch["bpm"]
+        if "key" in patch:
+            self._key = patch["key"]
+        if "scale" in patch:
+            self._scale = patch["scale"]
+        if "bars" in patch:
+            self._bars = patch["bars"]
+        if "beats_per_bar" in patch:
+            self._beats_per_bar = patch["beats_per_bar"]
+
+        for attr, key in (
+            ("_count_in_beats", "count_in_beats"),
+            ("_min_chord_beats", "min_chord_beats"),
+            ("_chord_play_beats", "chord_play_beats"),
+            ("_manual_quant_beats", "manual_quant_beats"),
+            ("_live_chord_window_beats", "live_chord_window_beats"),
+            ("_metronome_rate_beats", "metronome_rate_beats"),
+        ):
+            if key in patch:
+                setattr(self, attr, patch[key])
+
+        if "restrict_chords" in patch:
+            self._restrict_chords_var.set(patch["restrict_chords"])
+        if "play_chords" in patch:
+            self._play_chords_var.set(patch["play_chords"])
+        if "loop" in patch:
+            self._loop_var.set(patch["loop"])
+        if "metronome" in patch:
+            self._metronome_var.set(patch["metronome"])
+        if "timeline_edit" in patch:
+            self._timeline_edit_enabled.set(patch["timeline_edit"])
+            self._on_timeline_edit_toggle()
+
+        if "progression" in patch:
+            self._progression = list(patch["progression"])
+            self._selected_seg = None
+            self._selected_chord = None
+            self._playback_seg_idx = -1
+
+        self.key_var.set(self._key)
+        self.scale_var.set(self._scale)
+        self.bpm_var.set(str(self._bpm))
+        self.bars_var.set(str(self._bars))
+        self.beats_var.set(str(self._beats_per_bar))
+        self.count_in_var.set(str(self._count_in_beats))
+        self.chord_beats_var.set(str(self._chord_play_beats))
+        self.manual_quant_var.set(str(self._manual_quant_beats))
+        self.live_window_var.set(self._live_chord_window_beats)
+
+        self._refresh_metronome_rate_options()
+        self._refresh_min_chord_options()
+        self._reset_live_chord_window(clear_current=False)
+        self._recompute()
+        self._refresh_views()
+        self._draw_timeline()
+        self._refresh_timeline_tools()
+        if self._chord_editor_open():
+            self._refresh_chord_editor()
 
     # ----- scale state ----------------------------------------------------
 
